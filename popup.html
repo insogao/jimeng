@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Jimeng AI</title>
+  <style>
+    body {
+      width: 350px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      padding: 16px;
+      color: #333;
+    }
+
+    h1 {
+      font-size: 18px;
+      margin: 0 0 16px 0;
+      color: #111;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    label {
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      display: block;
+      color: #555;
+    }
+
+    textarea,
+    select,
+    input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 80px;
+    }
+
+    button {
+      background: #000;
+      color: #fff;
+      border: none;
+      width: 100%;
+      padding: 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 14px;
+      transition: background 0.2s;
+    }
+
+    button:hover {
+      background: #333;
+    }
+
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+
+    #status {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #666;
+      text-align: center;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    #gallery {
+      margin-top: 16px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    #gallery img {
+      width: 100%;
+      border-radius: 4px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      cursor: pointer;
+    }
+
+    .error {
+      color: #d32f2f;
+    }
+
+    .success {
+      color: #388e3c;
+    }
+  </style>
+</head>
+
+<body>
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+    <h1 style="margin:0; font-size:16px;">Jimeng AI</h1>
+    <div style="background:#eee; padding:2px; border-radius:6px; display:flex;">
+      <button id="btn-cn" class="toggle-btn">Jimeng</button>
+      <button id="btn-us" class="toggle-btn">Dreamina</button>
+    </div>
+  </div>
+
+  <div id="connection-status"
+    style="font-size:11px; margin-bottom:12px; padding:6px; background:#f5f5f5; border-radius:4px; display:flex; justify-content:space-between; align-items:center;">
+    <span id="region-badge">Detecting...</span>
+    <span id="user-id" style="color:#888;"></span>
+  </div>
+
+  <style>
+    .toggle-btn {
+      background: transparent;
+      border: none;
+      padding: 4px 8px;
+      font-size: 10px;
+      cursor: pointer;
+      border-radius: 4px;
+      color: #666;
+      width: auto;
+    }
+
+    .toggle-btn.active {
+      background: #fff;
+      color: #000;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+      font-weight: bold;
+    }
+  </style>
+
+  <label for="prompt">Prompt Suggestion</label>
+  <textarea id="prompt" placeholder="Describe your imagination..."></textarea>
+
+  <div class="grid">
+    <div>
+      <label for="model">Model</label>
+      <select id="model">
+        <option value="jimeng-4.5">Jimeng 4.5</option>
+        <option value="jimeng-4.1">Jimeng 4.1</option>
+        <option value="jimeng-4.0">Jimeng 4.0</option>
+        <option value="jimeng-3.0">Jimeng 3.0</option>
+      </select>
+    </div>
+    <div>
+      <label for="ratio">Ratio</label>
+      <select id="ratio">
+        <option value="1:1">1:1 (Square)</option>
+        <option value="16:9">16:9 (Landscape)</option>
+        <option value="9:16">9:16 (Portrait)</option>
+        <option value="4:3">4:3</option>
+        <option value="3:4">3:4</option>
+      </select>
+    </div>
+  </div>
+
+  <button id="generateBtn">Generate Image</button>
+
+  <div id="status"></div>
+  <div id="gallery"></div>
+
+  <script src="popup.js"></script>
+</body>
+
+</html>
