@@ -7,7 +7,8 @@
         "activeTab",
         "cookies",
         "storage",
-        "downloads"
+        "downloads",
+        "nativeMessaging"
     ],
     "host_permissions": [
         "*://*.jianying.com/*",

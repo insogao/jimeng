@@ -624,3 +624,133 @@ async function handleGenerate(userPayload) {
         return { success: false, error: err.message };
     }
 }
+
+
+// ==================== Native Messaging File IPC ====================
+// 通过文件系统与外部程序通信，无需启动服务器
+
+const NATIVE_MSG_DIR = 'jimeng/native-messaging';
+
+// Check for new tasks every 2 seconds
+setInterval(checkNativeTasks, 2000);
+
+async function checkNativeTasks() {
+    try {
+        const dir = await getNativeMsgDir();
+        if (!dir) return;
+        
+        // Find pending tasks
+        const tasks = await dir.list();
+        for (const entry of tasks) {
+            if (entry.name.startsWith('task_') && entry.name.endsWith('.json')) {
+                await processNativeTask(dir, entry.name);
+            }
+        }
+    } catch (err) {
+        // Silent fail - directory might not exist
+    }
+}
+
+async function getNativeMsgDir() {
+    // Use chrome.downloads to get the default download directory
+    // and check for .jimeng/native-messaging folder
+    return {
+        list: async () => {
+            // We can't directly list filesystem, so we use a different approach
+            // Check via chrome.storage if there are pending tasks
+            const result = await chrome.storage.local.get(['native_tasks']);
+            const tasks = result.native_tasks || [];
+            return tasks.map(t => ({ name: `task_${t.id}.json` }));
+        }
+    };
+}
+
+async function processNativeTask(dir, filename) {
+    console.log(`[Native] Processing task: ${filename}`);
+    
+    try {
+        // In a real implementation, we would read from the file
+        // For now, we rely on the storage-based approach
+        // This is a simplified version
+    } catch (err) {
+        console.error(`[Native] Error processing task: ${err}`);
+    }
+}
+
+// Listen for external messages (from native host or other extensions)
+chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+    console.log('[External Message]', message);
+    
+    if (message.action === 'batch_generate') {
+        handleExternalBatchGenerate(message.payload).then(result => {
+            sendResponse(result);
+        });
+        return true; // Keep channel open
+    }
+    
+    if (message.action === 'get_status') {
+        getExternalStatus().then(status => {
+            sendResponse(status);
+        });
+        return true;
+    }
+    
+    sendResponse({ error: 'Unknown action' });
+});
+
+async function handleExternalBatchGenerate(payload) {
+    try {
+        const prompts = payload.prompts || [];
+        const model = payload.model || 'jimeng-4.5';
+        const ratio = payload.ratio || '16:9';
+        const interval = payload.interval || 1;
+        
+        console.log(`[External] Batch generate: ${prompts.length} prompts`);
+        
+        // Submit all prompts
+        const results = [];
+        for (let i = 0; i < prompts.length; i++) {
+            const promptData = prompts[i];
+            const response = await handleGenerateAsync({
+                prompt: promptData.prompt,
+                promptName: promptData.name || `prompt_${i}`,
+                model: model,
+                ratio: ratio,
+                resolution: '2k',
+                preferredRegion: null
+            });
+            
+            results.push({
+                name: promptData.name,
+                success: response.success,
+                historyId: response.historyId
+            });
+            
+            if (i < prompts.length - 1) {
+                await sleep(interval * 1000);
+            }
+        }
+        
+        return {
+            success: true,
+            submitted: results.length,
+            results: results
+        };
+        
+    } catch (err) {
+        console.error('[External] Batch error:', err);
+        return { success: false, error: err.message };
+    }
+}
+
+async function getExternalStatus() {
+    const pending = await chrome.storage.local.get(['jimeng_pending_batch']);
+    const completed = await chrome.storage.local.get(['jimeng_completed_results']);
+    
+    return {
+        pending: pending.jimeng_pending_batch || [],
+        completed: completed.jimeng_completed_results || []
+    };
+}
+
+console.log('[BG] Native Messaging IPC initialized');

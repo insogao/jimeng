@@ -1,0 +1,9 @@
+{
+  "name": "jimeng_native_host",
+  "description": "Jimeng AI Native Messaging Host",
+  "path": "jimeng_native_host.py",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://*/"
+  ]
+}
