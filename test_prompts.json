@@ -1,0 +1,16 @@
+{
+  "metadata": {
+    "title": "测试任务",
+    "description": "快速测试 Jimeng 批量生成功能"
+  },
+  "scenes": {
+    "landscape": {
+      "name": "山景日落",
+      "prompt": "A beautiful mountain landscape at sunset, golden hour lighting, 4k quality, highly detailed"
+    },
+    "city": {
+      "name": "赛博城市",
+      "prompt": "A futuristic cyberpunk city at night with neon lights, flying cars, highly detailed, 8k"
+    }
+  }
+}

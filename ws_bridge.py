@@ -13,6 +13,7 @@ Then open the browser extension panel to connect.
 
 import asyncio
 import json
+import time
 import websockets
 import http.server
 import socketserver
@@ -82,6 +83,19 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
             self.send_json({'status': 'ok', 'clients': len(clients)})
         elif self.path == '/tasks':
             self.send_json({'tasks': tasks, 'results': results})
+        elif self.path == '/api/status':
+            # Return pending and completed tasks
+            pending = [t for t in tasks.values() if t.get('status') == 'pending']
+            completed = [r for r in results.values()]
+            self.send_json({
+                'pending': pending,
+                'completed': completed,
+                'pending_count': len(pending),
+                'completed_count': len(completed)
+            })
+        elif self.path == '/api/results':
+            # Return all results
+            self.send_json(list(results.values()))
         else:
             self.send_error(404, "Not found")
     
@@ -134,8 +148,25 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
     
     async def handle_batch(self, data):
         """Forward batch generation to browser"""
+        global tasks
+        
+        batch_id = data.get('batch_id', f"batch_{int(time.time() * 1000)}")
+        prompts = data.get('prompts', [])
+        
+        # Store task info
+        tasks[batch_id] = {
+            'id': batch_id,
+            'status': 'pending',
+            'prompts': len(prompts),
+            'model': data.get('model', 'jimeng-4.5'),
+            'ratio': data.get('ratio', '16:9'),
+            'created_at': datetime.now().isoformat()
+        }
+        
         if not clients:
-            print("[ERROR] No browser connected")
+            print(f"[ERROR] No browser connected for batch {batch_id}")
+            tasks[batch_id]['status'] = 'error'
+            tasks[batch_id]['error'] = 'No browser connected'
             return
         
         client = clients.pop()
@@ -143,12 +174,14 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
         
         await client.send(json.dumps({
             'type': 'batch',
-            'batch_id': data.get('batch_id'),
-            'prompts': data.get('prompts'),
+            'batch_id': batch_id,
+            'prompts': prompts,
             'model': data.get('model', 'jimeng-4.5'),
             'ratio': data.get('ratio', '16:9'),
             'interval': data.get('interval', 1)
         }))
+        
+        print(f"[{datetime.now()}] Batch {batch_id} sent to browser ({len(prompts)} prompts)")
     
     def send_json(self, data):
         """Send JSON response"""
