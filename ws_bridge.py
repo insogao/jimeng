@@ -101,12 +101,18 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
     
     def do_POST(self):
         """Handle POST requests"""
+        print(f"[{datetime.now()}] POST {self.path}")
+        
         content_length = int(self.headers.get('Content-Length', 0))
+        print(f"  Content-Length: {content_length}")
+        
         body = self.rfile.read(content_length).decode('utf-8')
+        print(f"  Body: {body[:200]}...")
         
         try:
             data = json.loads(body) if body else {}
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            print(f"  JSON parse error: {e}")
             self.send_error(400, "Invalid JSON")
             return
         
@@ -124,8 +130,11 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
             
         elif self.path == '/api/batch':
             # Batch generation from JSON
+            print(f"  Handling /api/batch")
+            
             batch_id = data.get('batch_id', f"batch_{int(time.time() * 1000)}")
             prompts = data.get('prompts', [])
+            print(f"  batch_id: {batch_id}, prompts: {len(prompts)}")
             
             # Store task info
             tasks[batch_id] = {
@@ -137,25 +146,32 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
                 'created_at': datetime.now().isoformat()
             }
             
+            print(f"  Clients connected: {len(clients)}")
+            
             # Forward to browser if connected
             if clients:
+                print(f"  Forwarding to browser...")
                 asyncio.run_coroutine_threadsafe(
                     self.forward_to_browser(batch_id, data),
                     loop
                 )
-                self.send_json({
+                response = {
                     'status': 'queued', 
                     'batch_id': batch_id,
                     'count': len(prompts),
                     'message': 'Task sent to browser'
-                })
+                }
+                print(f"  Sending response: {response}")
+                self.send_json(response)
             else:
-                self.send_json({
+                response = {
                     'status': 'queued',
                     'batch_id': batch_id,
                     'count': len(prompts),
                     'message': 'Task queued, waiting for browser connection'
-                })
+                }
+                print(f"  Sending response (no browser): {response}")
+                self.send_json(response)
             
         else:
             self.send_error(404, "Not found")
@@ -213,11 +229,16 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
     
     def send_json(self, data):
         """Send JSON response"""
+        print(f"  send_json: {data}")
+        response = json.dumps(data).encode('utf-8')
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Content-Length', len(response))
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode())
+        self.wfile.write(response)
+        self.wfile.flush()
+        print(f"  Response sent successfully")
     
     def send_error(self, code, message):
         """Send error response"""

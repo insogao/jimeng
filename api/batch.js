@@ -863,13 +863,19 @@ function initWebSocket() {
 }
 
 function connectWebSocket() {
-    if (wsConnected || ws) return;
+    if (wsConnected || ws) {
+        console.log('[WS] Already connected or connecting');
+        return;
+    }
+    
+    console.log('[WS] Attempting to connect to ws://localhost:8765');
     
     try {
         ws = new WebSocket('ws://localhost:8765');
+        console.log('[WS] WebSocket object created');
         
         ws.onopen = () => {
-            console.log('[WS] Connected to bridge');
+            console.log('[WS] Connected to bridge!');
             wsConnected = true;
             updateWSStatus(true);
             log('✓ 已连接到本地服务，可通过外部程序调用');
@@ -891,15 +897,15 @@ function connectWebSocket() {
             }
         };
         
-        ws.onclose = () => {
-            console.log('[WS] Disconnected');
+        ws.onclose = (event) => {
+            console.log('[WS] Disconnected', event.code, event.reason);
             wsConnected = false;
             ws = null;
             updateWSStatus(false);
         };
         
         ws.onerror = (err) => {
-            console.log('[WS] Error:', err);
+            console.error('[WS] Error:', err);
             wsConnected = false;
             updateWSStatus(false);
         };
@@ -911,28 +917,38 @@ function connectWebSocket() {
 
 function handleWSMessage(data) {
     console.log('[WS] Received:', data);
+    log(`[WS] 收到消息类型: ${data.type}`);
     
     if (data.type === 'batch') {
         // 外部程序发送的批量任务
+        console.log('[WS] Handling batch task:', data.batch_id);
         log(`📥 收到外部批量任务: ${data.prompts?.length || 0} prompts`);
         handleExternalBatch(data);
     } else if (data.type === 'generate') {
         // 外部程序发送的单张任务
+        console.log('[WS] Handling single task:', data.task_id);
         log(`📥 收到外部单张任务: ${data.promptName}`);
         handleExternalGenerate(data);
     } else if (data.type === 'ping') {
         // 保持连接
+        console.log('[WS] Received ping, sending pong');
         ws.send(JSON.stringify({ type: 'pong' }));
+    } else {
+        console.log('[WS] Unknown message type:', data.type);
     }
 }
 
 async function handleExternalBatch(data) {
+    console.log('[WS] handleExternalBatch called', data);
+    
     // 将外部任务添加到队列
     const batchId = data.batch_id || `ext_${Date.now()}`;
     const prompts = data.prompts || [];
     const model = data.model || 'jimeng-4.5';
     const ratio = data.ratio || '16:9';
     const interval = data.interval || 1;
+    
+    console.log(`[WS] Creating task ${batchId} with ${prompts.length} prompts`);
     
     // 创建任务
     const task = {
@@ -953,17 +969,22 @@ async function handleExternalBatch(data) {
     queue.push(task);
     await saveQueue(queue);
     
+    console.log('[WS] Task saved to queue');
     log(`外部任务已添加: ${prompts.length} prompts`);
     updateStats();
     
     // 如果当前没有在运行，自动开始
     if (!isRunning) {
+        console.log('[WS] Auto-starting batch processing');
         log('自动开始处理外部任务...');
         processBatch();
+    } else {
+        console.log('[WS] Already running, task queued');
     }
     
     // 发送确认
     if (ws && wsConnected) {
+        console.log('[WS] Sending confirmation back');
         ws.send(JSON.stringify({
             type: 'task_received',
             batch_id: batchId,
