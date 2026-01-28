@@ -1,12 +1,13 @@
 {
     "manifest_version": 3,
     "name": "Jimeng / Dreamina Connector",
-    "version": "1.0",
+    "version": "1.1",
     "description": "Generate images using Jimeng/Dreamina AI authentication from your browser session.",
     "permissions": [
         "activeTab",
         "cookies",
-        "storage"
+        "storage",
+        "downloads"
     ],
     "host_permissions": [
         "*://*.jianying.com/*",
@@ -20,5 +21,11 @@
     "background": {
         "service_worker": "background.js",
         "type": "module"
-    }
+    },
+    "web_accessible_resources": [
+        {
+            "resources": ["api/*"],
+            "matches": ["<all_urls>"]
+        }
+    ]
 }

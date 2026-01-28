@@ -197,6 +197,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true; // Keep channel open for async response
     }
 
+    if (message.action === "GENERATE_IMAGE_ASYNC") {
+        // Fire-and-forget mode: submit and return immediately, don't wait for result
+        console.log("[BG] Received Async Generate Request:", message.payload);
+        handleGenerateAsync(message.payload).then(response => {
+            sendResponse(response);
+        });
+        return true;
+    }
+
     if (message.action === "CHECK_STATUS") {
         const preferred = message.payload?.preferredRegion; // "CN" or "US" or null
         detectRegion(true, preferred).then(region => {
@@ -209,7 +218,267 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Just a signal, can be enhanced to clear cache if any
         sendResponse({ success: true });
     }
+
+    if (message.action === "DOWNLOAD_IMAGE") {
+        // Ensure keep-alive is running
+        startKeepAlive();
+        
+        const { url, filename, saveAs } = message.payload;
+        
+        (async () => {
+            try {
+                console.log("[BG] Downloading:", filename);
+                const downloadId = await chrome.downloads.download({
+                    url: url,
+                    filename: filename,
+                    saveAs: saveAs || false
+                });
+                console.log("[BG] Download started:", downloadId);
+                sendResponse({ success: true, downloadId });
+            } catch (err) {
+                console.error("[BG] Download failed:", err);
+                sendResponse({ success: false, error: err.message });
+            }
+        })();
+        
+        return true; // Keep message channel open
+    }
+
+    if (message.action === "PING") {
+        // Keep-alive ping, just respond
+        sendResponse({ pong: true, timestamp: Date.now() });
+    }
 });
+
+// Store pending results for async polling
+const pendingResults = new Map();
+const STORAGE_KEY = 'jimeng_pending_batch';
+
+// Load pending tasks from storage on startup
+chrome.storage.local.get([STORAGE_KEY], (result) => {
+    if (result[STORAGE_KEY]) {
+        const tasks = result[STORAGE_KEY];
+        console.log(`[BG] Loaded ${tasks.length} pending tasks from storage`);
+        tasks.forEach(task => {
+            pendingResults.set(task.historyId, {
+                region: task.region,
+                promptName: task.promptName,
+                startTime: task.startTime || Date.now(),
+                attempts: task.attempts || 0
+            });
+            // Resume polling
+            pollSingleResult(task.historyId);
+        });
+    }
+});
+
+// Save pending tasks to storage
+async function savePendingTasks() {
+    const tasks = [];
+    pendingResults.forEach((value, historyId) => {
+        tasks.push({
+            historyId,
+            region: value.region,
+            promptName: value.promptName,
+            startTime: value.startTime,
+            attempts: value.attempts
+        });
+    });
+    await chrome.storage.local.set({ [STORAGE_KEY]: tasks });
+}
+
+// Keep service worker alive during batch processing
+let keepAliveInterval = null;
+function startKeepAlive() {
+    if (!keepAliveInterval) {
+        keepAliveInterval = setInterval(() => {
+            if (pendingResults.size === 0) {
+                stopKeepAlive();
+            } else {
+                console.log('[BG] Keep alive, pending tasks:', pendingResults.size);
+            }
+        }, 20000); // Every 20 seconds
+    }
+}
+
+function stopKeepAlive() {
+    if (keepAliveInterval) {
+        clearInterval(keepAliveInterval);
+        keepAliveInterval = null;
+    }
+}
+
+async function handleGenerateAsync(userPayload) {
+    // Fire-and-forget mode: submit request and return immediately
+    try {
+        const region = await detectRegion(false, userPayload.preferredRegion);
+        const userModel = userPayload.model || "jimeng-4.5";
+        const mappedModel = MODELS[userModel] || MODELS["jimeng-4.5"];
+
+        const resolution = resolveResolution(
+            userModel,
+            null,
+            userPayload.resolution || "2k",
+            userPayload.ratio || "1:1"
+        );
+
+        const buildResult = buildGeneratePayload({
+            userModel,
+            model: mappedModel,
+            prompt: userPayload.prompt,
+            negativePrompt: userPayload.negativePrompt,
+            resolution,
+            regionInfo: { aid: region.aid }
+        });
+
+        const genRes = await apiRequest("/mweb/v1/aigc_draft/generate", region, {
+            data: buildResult.payload
+        });
+
+        if (!genRes?.data?.aigc_data?.history_record_id) {
+            return { success: false, error: genRes?.errmsg || "API Error: Failed to start generation." };
+        }
+
+        const historyId = genRes.data.aigc_data.history_record_id;
+        const promptName = userPayload.promptName || 'Unnamed';
+        
+        // Store for background polling
+        pendingResults.set(historyId, {
+            region,
+            promptName,
+            startTime: Date.now(),
+            attempts: 0
+        });
+        
+        // Save to storage for persistence
+        await savePendingTasks();
+        
+        // Start keep-alive to prevent service worker from sleeping
+        startKeepAlive();
+        
+        // Start background polling for this request
+        pollSingleResult(historyId);
+        
+        return { success: true, historyId, promptName, submitted: true };
+    } catch (err) {
+        console.error("[BG] Async Generate Error:", err);
+        return { success: false, error: err.message };
+    }
+}
+
+// Background polling for single result
+async function pollSingleResult(historyId) {
+    const pending = pendingResults.get(historyId);
+    if (!pending) return;
+    
+    if (pending.attempts >= 60) {
+        console.log(`[BG] Polling timeout for ${historyId}`);
+        pendingResults.delete(historyId);
+        await savePendingTasks();
+        return;
+    }
+    
+    await new Promise(r => setTimeout(r, 5000));
+    pending.attempts++;
+    
+    // Save updated attempts count
+    await savePendingTasks();
+    
+    try {
+        const pollRes = await apiRequest("/mweb/v1/get_history_by_ids", pending.region, {
+            data: {
+                history_ids: [historyId],
+                image_info: { width: 2048, height: 2048, format: "webp" }
+            }
+        });
+        
+        const record = pollRes.data?.[historyId];
+        if (record) {
+            if (record.status === 10 || record.status === 50) {
+                // Success - extract images
+                const items = record.item_list || [];
+                let images = items.map(item => {
+                    if (item.image?.large_images?.[0]?.image_url) {
+                        return item.image.large_images[0].image_url;
+                    }
+                    if (item.common_attr?.cover_url) {
+                        return item.common_attr.cover_url;
+                    }
+                    return item.url || item.image_url || item.cover_url || null;
+                }).filter(Boolean);
+                
+                if (images.length === 0 && record.origin_item_list) {
+                    images = record.origin_item_list.map(item => item.image_url || item.url).filter(Boolean);
+                }
+                
+                // Store completed result for popup to retrieve
+                const completedKey = 'jimeng_completed_results';
+                const stored = await chrome.storage.local.get([completedKey]);
+                const completed = stored[completedKey] || [];
+                completed.push({
+                    historyId,
+                    promptName: pending.promptName,
+                    images,
+                    success: images.length > 0,
+                    completedAt: Date.now()
+                });
+                // Keep only last 100 results
+                if (completed.length > 100) completed.shift();
+                await chrome.storage.local.set({ [completedKey]: completed });
+                
+                // Send message to popup with results (if popup is open)
+                chrome.runtime.sendMessage({
+                    action: "BATCH_RESULT",
+                    payload: {
+                        historyId,
+                        promptName: pending.promptName,
+                        images,
+                        success: images.length > 0
+                    }
+                }).catch(() => {});
+                
+                pendingResults.delete(historyId);
+                await savePendingTasks();
+                return;
+            } else if (record.status === 30) {
+                // Failed
+                const completedKey = 'jimeng_completed_results';
+                const stored = await chrome.storage.local.get([completedKey]);
+                const completed = stored[completedKey] || [];
+                completed.push({
+                    historyId,
+                    promptName: pending.promptName,
+                    images: [],
+                    success: false,
+                    error: "Generation failed",
+                    completedAt: Date.now()
+                });
+                await chrome.storage.local.set({ [completedKey]: completed });
+                
+                chrome.runtime.sendMessage({
+                    action: "BATCH_RESULT",
+                    payload: {
+                        historyId,
+                        promptName: pending.promptName,
+                        images: [],
+                        success: false,
+                        error: "Generation failed"
+                    }
+                }).catch(() => {});
+                
+                pendingResults.delete(historyId);
+                await savePendingTasks();
+                return;
+            }
+        }
+        
+        // Continue polling
+        pollSingleResult(historyId);
+    } catch (err) {
+        console.error(`[BG] Poll error for ${historyId}:`, err);
+        pollSingleResult(historyId);
+    }
+}
 
 async function handleGenerate(userPayload) {
     try {

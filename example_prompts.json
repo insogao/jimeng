@@ -1,0 +1,25 @@
+{
+  "metadata": {
+    "title": "示例任务 - 科幻场景",
+    "description": "测试 API 批量生成功能",
+    "aspect_ratio": "16:9",
+    "resolution": "2K"
+  },
+  "scenes": {
+    "space_station": {
+      "name": "空间站",
+      "description": "未来太空站",
+      "prompt": "A massive futuristic space station orbiting Earth, solar panels gleaming in sunlight, Earth visible in background with blue oceans and white clouds, sci-fi concept art, ultra detailed, cinematic lighting, 8k resolution"
+    },
+    "alien_planet": {
+      "name": "外星行星",
+      "description": "异星地表",
+      "prompt": "Alien planet landscape with purple sky and twin moons, strange rock formations, bioluminescent plants, distant mountain range, otherworldly atmosphere, sci-fi environment, concept art style, highly detailed"
+    },
+    "cyberpunk_city": {
+      "name": "赛博朋克城市",
+      "description": "未来都市夜景",
+      "prompt": "Cyberpunk cityscape at night, neon lights reflecting on wet streets, towering skyscrapers with holographic advertisements, flying vehicles, rain atmosphere, blade runner style, cinematic composition, ultra detailed"
+    }
+  }
+}

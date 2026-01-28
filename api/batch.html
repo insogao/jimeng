@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jimeng Batch API</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+            background: #f5f5f5;
+        }
+        h1 {
+            margin-bottom: 20px;
+            color: #333;
+        }
+        .panel {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .status {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .status-item {
+            flex: 1;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            text-align: center;
+        }
+        .status-item h3 {
+            font-size: 24px;
+            color: #2196f3;
+            margin-bottom: 5px;
+        }
+        .status-item label {
+            font-size: 12px;
+            color: #666;
+        }
+        .log-container {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 6px;
+            font-family: 'Consolas', monospace;
+            font-size: 12px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .log-entry {
+            padding: 3px 0;
+            border-bottom: 1px solid #333;
+        }
+        .log-time {
+            color: #858585;
+        }
+        .log-info { color: #4fc1ff; }
+        .log-success { color: #4ec9b0; }
+        .log-error { color: #f48771; }
+        .log-warn { color: #dcdcaa; }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: #2196f3;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #1976d2;
+        }
+        .btn-secondary {
+            background: #e0e0e0;
+            color: #333;
+        }
+        .btn-danger {
+            background: #f44336;
+            color: white;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .queue-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .queue-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .queue-item:last-child {
+            border-bottom: none;
+        }
+        .queue-status {
+            font-size: 12px;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+        .status-pending { background: #fff3e0; color: #e65100; }
+        .status-running { background: #e3f2fd; color: #1565c0; }
+        .status-done { background: #e8f5e9; color: #2e7d32; }
+        .status-error { background: #ffebee; color: #c62828; }
+        
+        input[type="text"], input[type="number"], select {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            width: 200px;
+        }
+        .setting-row {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        .setting-row label {
+            width: 120px;
+            font-size: 14px;
+            color: #555;
+        }
+        .drop-zone {
+            border: 2px dashed #ccc;
+            border-radius: 8px;
+            padding: 40px;
+            text-align: center;
+            color: #999;
+            transition: all 0.2s;
+        }
+        .drop-zone.dragover {
+            border-color: #2196f3;
+            background: #e3f2fd;
+        }
+        .file-input {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <h1>Jimeng Batch API 控制面板</h1>
+    
+    <div class="panel">
+        <h2>快速导入</h2>
+        
+        <!-- 文件拖拽 -->
+        <div id="drop-zone" class="drop-zone" style="margin-bottom: 15px;">
+            <p>拖拽 JSON 文件到此处，或 <a href="#" id="file-select">点击选择</a></p>
+            <input type="file" id="file-input" class="file-input" accept=".json">
+        </div>
+        
+        <!-- 直接粘贴 -->
+        <div style="margin-top: 15px;">
+            <label style="font-size: 12px; color: #666; display: block; margin-bottom: 5px;">
+                或者直接粘贴 JSON 内容：
+            </label>
+            <textarea id="json-paste" placeholder="在此粘贴 JSON 内容...
+{
+  &quot;metadata&quot;: {&quot;title&quot;: &quot;任务名称&quot;},
+  &quot;items&quot;: {
+    &quot;item1&quot;: {&quot;name&quot;: &quot;提示词1&quot;, &quot;prompt&quot;: &quot;描述...&quot;}
+  }
+}" style="width: 100%; height: 120px; font-family: monospace; font-size: 12px; padding: 10px; border: 1px solid #ddd; border-radius: 4px; resize: vertical;"></textarea>
+            <button id="btn-parse-json" class="btn-secondary" style="margin-top: 8px; width: auto; padding: 6px 16px; font-size: 12px;">
+                解析并添加任务
+            </button>
+        </div>
+    </div>
+    
+    <div class="panel">
+        <h2>状态监控</h2>
+        <div class="status">
+            <div class="status-item">
+                <h3 id="stat-pending">0</h3>
+                <label>待处理</label>
+            </div>
+            <div class="status-item">
+                <h3 id="stat-running">0</h3>
+                <label>进行中</label>
+            </div>
+            <div class="status-item">
+                <h3 id="stat-completed">0</h3>
+                <label>已完成</label>
+            </div>
+            <div class="status-item">
+                <h3 id="stat-failed">0</h3>
+                <label>失败</label>
+            </div>
+        </div>
+        
+        <div class="controls">
+            <button id="btn-start" class="btn-primary">开始处理</button>
+            <button id="btn-pause" class="btn-secondary" disabled>暂停</button>
+            <button id="btn-clear" class="btn-danger">清空记录</button>
+            <button id="btn-export" class="btn-secondary">导出结果</button>
+            <button id="btn-download-all" class="btn-primary" style="display:none; background:#4caf50;">📦 打包下载全部</button>
+        </div>
+        
+        <div id="download-panel" style="display:none; margin-top: 15px; padding: 15px; background: #f0f8ff; border-radius: 6px;">
+            <h4 style="margin-bottom: 10px;">📥 下载中心</h4>
+            <p style="font-size: 12px; color: #666; margin-bottom: 10px;">
+                共 <span id="download-count">0</span> 组图片，<span id="download-total">0</span> 张
+            </p>
+            <div id="download-list" style="max-height: 200px; overflow-y: auto; font-size: 12px;"></div>
+            <div style="margin-top: 10px;">
+                <button id="btn-download-zip" class="btn-primary" style="width: auto; margin-right: 10px;">下载为ZIP</button>
+                <button id="btn-download-single" class="btn-secondary" style="width: auto;">逐个下载</button>
+            </div>
+        </div>
+    </div>
+    
+    <div class="panel">
+        <h2>设置</h2>
+        <div class="setting-row">
+            <label>模型</label>
+            <select id="setting-model">
+                <option value="jimeng-4.5">Jimeng 4.5</option>
+                <option value="jimeng-4.1">Jimeng 4.1</option>
+                <option value="jimeng-4.0">Jimeng 4.0</option>
+                <option value="jimeng-3.0">Jimeng 3.0</option>
+            </select>
+        </div>
+        <div class="setting-row">
+            <label>比例</label>
+            <select id="setting-ratio">
+                <option value="16:9">16:9 (Landscape)</option>
+                <option value="9:16">9:16 (Portrait)</option>
+                <option value="1:1">1:1 (Square)</option>
+                <option value="4:3">4:3</option>
+                <option value="3:4">3:4</option>
+            </select>
+        </div>
+        <div class="setting-row">
+            <label>间隔时间(秒)</label>
+            <input type="number" id="setting-interval" value="1" min="1" max="10">
+        </div>
+        <div class="setting-row">
+            <label>下载方式</label>
+            <select id="setting-download-mode">
+                <option value="ask" selected>仅生成，完成后手动下载（推荐）</option>
+                <option value="auto">自动下载到默认目录</option>
+                <option value="manual">每次手动选择目录</option>
+            </select>
+        </div>
+        <div class="setting-row" id="download-path-row" style="display: none;">
+            <label>保存子目录</label>
+            <input type="text" id="setting-download-path" placeholder="jimeng/任务名称" value="jimeng">
+            <small style="color: #999; margin-left: 10px;">相对于下载目录的路径</small>
+        </div>
+    </div>
+    
+    <div class="panel">
+        <h2>任务队列</h2>
+        <div id="queue-list" class="queue-list">
+            <p style="color: #999; text-align: center; padding: 40px;">
+                暂无任务，请拖拽 JSON 文件到上方区域
+            </p>
+        </div>
+    </div>
+    
+    <div class="panel">
+        <h2>运行日志</h2>
+        <div id="log-container" class="log-container">
+            <div class="log-entry">
+                <span class="log-time">[系统]</span> 
+                <span class="log-info">API 控制面板已加载，等待任务...</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="batch.js"></script>
+</body>
+</html>
