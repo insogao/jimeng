@@ -112,56 +112,77 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
         
         if self.path == '/api/generate':
             # Single image generation
-            asyncio.run_coroutine_threadsafe(
-                self.handle_generate(data), 
-                loop
-            )
-            self.send_json({'status': 'queued', 'task_id': data.get('task_id')})
+            task_id = data.get('task_id', f"task_{int(time.time() * 1000)}")
+            
+            if clients:
+                asyncio.run_coroutine_threadsafe(
+                    self.handle_generate(task_id, data), 
+                    loop
+                )
+            
+            self.send_json({'status': 'queued', 'task_id': task_id})
             
         elif self.path == '/api/batch':
             # Batch generation from JSON
-            asyncio.run_coroutine_threadsafe(
-                self.handle_batch(data),
-                loop
-            )
-            self.send_json({'status': 'queued', 'batch_id': data.get('batch_id')})
+            batch_id = data.get('batch_id', f"batch_{int(time.time() * 1000)}")
+            prompts = data.get('prompts', [])
+            
+            # Store task info
+            tasks[batch_id] = {
+                'id': batch_id,
+                'status': 'pending',
+                'prompts': len(prompts),
+                'model': data.get('model', 'jimeng-4.5'),
+                'ratio': data.get('ratio', '16:9'),
+                'created_at': datetime.now().isoformat()
+            }
+            
+            # Forward to browser if connected
+            if clients:
+                asyncio.run_coroutine_threadsafe(
+                    self.forward_to_browser(batch_id, data),
+                    loop
+                )
+                self.send_json({
+                    'status': 'queued', 
+                    'batch_id': batch_id,
+                    'count': len(prompts),
+                    'message': 'Task sent to browser'
+                })
+            else:
+                self.send_json({
+                    'status': 'queued',
+                    'batch_id': batch_id,
+                    'count': len(prompts),
+                    'message': 'Task queued, waiting for browser connection'
+                })
             
         else:
             self.send_error(404, "Not found")
     
-    async def handle_generate(self, data):
+    async def handle_generate(self, task_id, data):
         """Forward single generation to browser"""
         if not clients:
             print("[ERROR] No browser connected")
             return
         
-        client = clients.pop()  # Get first client
-        clients.add(client)
-        
-        await client.send(json.dumps({
-            'type': 'generate',
-            'task_id': data.get('task_id'),
-            'prompt': data.get('prompt'),
-            'model': data.get('model', 'jimeng-4.5'),
-            'ratio': data.get('ratio', '16:9')
-        }))
+        try:
+            client = clients.pop()
+            clients.add(client)
+            
+            await client.send(json.dumps({
+                'type': 'generate',
+                'task_id': task_id,
+                'prompt': data.get('prompt'),
+                'model': data.get('model', 'jimeng-4.5'),
+                'ratio': data.get('ratio', '16:9')
+            }))
+        except Exception as e:
+            print(f"[ERROR] Failed to send generate: {e}")
     
-    async def handle_batch(self, data):
+    async def forward_to_browser(self, batch_id, data):
         """Forward batch generation to browser"""
-        global tasks
-        
-        batch_id = data.get('batch_id', f"batch_{int(time.time() * 1000)}")
         prompts = data.get('prompts', [])
-        
-        # Store task info
-        tasks[batch_id] = {
-            'id': batch_id,
-            'status': 'pending',
-            'prompts': len(prompts),
-            'model': data.get('model', 'jimeng-4.5'),
-            'ratio': data.get('ratio', '16:9'),
-            'created_at': datetime.now().isoformat()
-        }
         
         if not clients:
             print(f"[ERROR] No browser connected for batch {batch_id}")
@@ -169,19 +190,26 @@ class APIHandler(http.server.BaseHTTPRequestHandler):
             tasks[batch_id]['error'] = 'No browser connected'
             return
         
-        client = clients.pop()
-        clients.add(client)
-        
-        await client.send(json.dumps({
-            'type': 'batch',
-            'batch_id': batch_id,
-            'prompts': prompts,
-            'model': data.get('model', 'jimeng-4.5'),
-            'ratio': data.get('ratio', '16:9'),
-            'interval': data.get('interval', 1)
-        }))
-        
-        print(f"[{datetime.now()}] Batch {batch_id} sent to browser ({len(prompts)} prompts)")
+        try:
+            client = clients.pop()
+            clients.add(client)
+            
+            await client.send(json.dumps({
+                'type': 'batch',
+                'batch_id': batch_id,
+                'prompts': prompts,
+                'model': data.get('model', 'jimeng-4.5'),
+                'ratio': data.get('ratio', '16:9'),
+                'interval': data.get('interval', 1)
+            }))
+            
+            tasks[batch_id]['status'] = 'sent'
+            print(f"[{datetime.now()}] Batch {batch_id} sent to browser ({len(prompts)} prompts)")
+            
+        except Exception as e:
+            print(f"[ERROR] Failed to send to browser: {e}")
+            tasks[batch_id]['status'] = 'error'
+            tasks[batch_id]['error'] = str(e)
     
     def send_json(self, data):
         """Send JSON response"""
