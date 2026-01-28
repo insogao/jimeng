@@ -31,24 +31,31 @@ def start_bridge():
     process = subprocess.Popen(
         [sys.executable, "ws_bridge.py"],
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         cwd=Path(__file__).parent,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
     )
     
-    # 等待服务启动
-    time.sleep(2)
-    
-    # 检查是否启动成功
+    # 循环检查服务是否就绪（最多等待 10 秒）
     import urllib.request
-    try:
-        urllib.request.urlopen(f"{API_URL}/health", timeout=5)
-        print(f"[{datetime.now()}] ✓ 服务已启动 (PID: {process.pid})")
-        return process
-    except:
-        print(f"[{datetime.now()}] ✗ 服务启动失败")
-        process.terminate()
-        return None
+    import urllib.error
+    
+    print(f"[{datetime.now()}] 等待服务就绪...")
+    for i in range(20):  # 20 * 0.5 = 10 秒
+        time.sleep(0.5)
+        try:
+            urllib.request.urlopen(f"{API_URL}/health", timeout=2)
+            print(f"[{datetime.now()}] ✓ 服务已启动 (PID: {process.pid})")
+            return process
+        except urllib.error.URLError:
+            continue  # 服务还没准备好
+        except Exception as e:
+            print(f"[{datetime.now()}] 检查出错: {e}")
+            continue
+    
+    print(f"[{datetime.now()}] ✗ 服务启动超时")
+    process.terminate()
+    return None
 
 
 def stop_bridge(process):
@@ -101,8 +108,8 @@ def extract_prompts(json_file):
     return _extract(data)
 
 
-def submit_task(prompts, model, ratio, interval):
-    """提交批量生成任务"""
+def submit_task(prompts, model, ratio, interval, retries=3):
+    """提交批量生成任务（带重试）"""
     import urllib.request
     import urllib.error
     
@@ -116,21 +123,30 @@ def submit_task(prompts, model, ratio, interval):
     
     data = json.dumps(payload).encode('utf-8')
     
-    req = urllib.request.Request(
-        f"{API_URL}/api/batch",
-        data=data,
-        headers={'Content-Type': 'application/json'},
-        method='POST'
-    )
+    for i in range(retries):
+        req = urllib.request.Request(
+            f"{API_URL}/api/batch",
+            data=data,
+            headers={'Content-Type': 'application/json'},
+            method='POST'
+        )
+        
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read().decode())
+                return result
+        except urllib.error.URLError as e:
+            if i < retries - 1:
+                print(f"  提交失败，重试 ({i+1}/{retries})...")
+                time.sleep(1)
+                continue
+            return {'error': f'Connection failed: {e}'}
+        except urllib.error.HTTPError as e:
+            return {'error': f'HTTP {e.code}: {e.reason}'}
+        except Exception as e:
+            return {'error': str(e)}
     
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read().decode())
-            return result
-    except urllib.error.HTTPError as e:
-        return {'error': f'HTTP {e.code}: {e.reason}'}
-    except Exception as e:
-        return {'error': str(e)}
+    return {'error': 'Max retries exceeded'}
 
 
 def wait_for_completion(timeout=300):
