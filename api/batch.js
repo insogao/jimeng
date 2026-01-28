@@ -843,3 +843,176 @@ document.addEventListener('DOMContentLoaded', () => {
     log('提示: 可以拖拽 JSON 文件或直接粘贴 JSON 内容');
     log('新功能: 任务完成后点击"📦 打包下载全部"批量下载图片');
 });
+
+
+// ==================== WebSocket Client ====================
+// 自动连接到本地 ws_bridge.py 服务器
+
+let ws = null;
+let wsConnected = false;
+let wsReconnectTimer = null;
+
+function initWebSocket() {
+    connectWebSocket();
+    // 每 5 秒检查连接
+    setInterval(() => {
+        if (!wsConnected) {
+            connectWebSocket();
+        }
+    }, 5000);
+}
+
+function connectWebSocket() {
+    if (wsConnected || ws) return;
+    
+    try {
+        ws = new WebSocket('ws://localhost:8765');
+        
+        ws.onopen = () => {
+            console.log('[WS] Connected to bridge');
+            wsConnected = true;
+            updateWSStatus(true);
+            log('✓ 已连接到本地服务，可通过外部程序调用');
+            
+            // 发送注册消息
+            ws.send(JSON.stringify({
+                type: 'register',
+                client: 'jimeng_extension',
+                timestamp: Date.now()
+            }));
+        };
+        
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                handleWSMessage(data);
+            } catch (err) {
+                console.error('[WS] Parse error:', err);
+            }
+        };
+        
+        ws.onclose = () => {
+            console.log('[WS] Disconnected');
+            wsConnected = false;
+            ws = null;
+            updateWSStatus(false);
+        };
+        
+        ws.onerror = (err) => {
+            console.log('[WS] Error:', err);
+            wsConnected = false;
+            updateWSStatus(false);
+        };
+        
+    } catch (err) {
+        console.log('[WS] Connection failed:', err);
+    }
+}
+
+function handleWSMessage(data) {
+    console.log('[WS] Received:', data);
+    
+    if (data.type === 'batch') {
+        // 外部程序发送的批量任务
+        log(`📥 收到外部批量任务: ${data.prompts?.length || 0} prompts`);
+        handleExternalBatch(data);
+    } else if (data.type === 'generate') {
+        // 外部程序发送的单张任务
+        log(`📥 收到外部单张任务: ${data.promptName}`);
+        handleExternalGenerate(data);
+    } else if (data.type === 'ping') {
+        // 保持连接
+        ws.send(JSON.stringify({ type: 'pong' }));
+    }
+}
+
+async function handleExternalBatch(data) {
+    // 将外部任务添加到队列
+    const batchId = data.batch_id || `ext_${Date.now()}`;
+    const prompts = data.prompts || [];
+    const model = data.model || 'jimeng-4.5';
+    const ratio = data.ratio || '16:9';
+    const interval = data.interval || 1;
+    
+    // 创建任务
+    const task = {
+        id: batchId,
+        fileName: 'external-task.json',
+        name: `External ${batchId}`,
+        prompts: prompts,
+        model: model,
+        ratio: ratio,
+        interval: interval,
+        status: 'pending',
+        createdAt: Date.now(),
+        source: 'external'
+    };
+    
+    // 保存到队列
+    const queue = await loadQueue();
+    queue.push(task);
+    await saveQueue(queue);
+    
+    log(`外部任务已添加: ${prompts.length} prompts`);
+    updateStats();
+    
+    // 如果当前没有在运行，自动开始
+    if (!isRunning) {
+        log('自动开始处理外部任务...');
+        processBatch();
+    }
+    
+    // 发送确认
+    if (ws && wsConnected) {
+        ws.send(JSON.stringify({
+            type: 'task_received',
+            batch_id: batchId,
+            count: prompts.length
+        }));
+    }
+}
+
+async function handleExternalGenerate(data) {
+    // 单张生成直接处理
+    const response = await sendMessageWithRetry({
+        action: "GENERATE_IMAGE_ASYNC",
+        payload: {
+            prompt: data.prompt,
+            promptName: data.promptName || 'external',
+            model: data.model || 'jimeng-4.5',
+            ratio: data.ratio || '16:9',
+            resolution: "2k",
+            preferredRegion: null
+        }
+    });
+    
+    if (ws && wsConnected) {
+        ws.send(JSON.stringify({
+            type: 'task_result',
+            task_id: data.task_id,
+            success: response && response.success,
+            historyId: response?.historyId
+        }));
+    }
+}
+
+// 启动 WebSocket 连接
+setTimeout(initWebSocket, 1000);
+
+// 更新 WebSocket 状态显示
+function updateWSStatus(connected) {
+    const statusEl = document.getElementById('ws-status');
+    if (!statusEl) return;
+    
+    if (connected) {
+        statusEl.innerHTML = '✅ 本地服务: 已连接 (外部程序可以调用)';
+        statusEl.style.background = '#e8f5e9';
+        statusEl.style.color = '#2e7d32';
+    } else {
+        statusEl.innerHTML = '🔌 本地服务: 未连接 (运行 python ws_bridge.py 后自动连接)';
+        statusEl.style.background = '#f5f5f5';
+        statusEl.style.color = '#666';
+    }
+}
+
+console.log('[Batch] WebSocket client initialized');
