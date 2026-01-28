@@ -7,7 +7,7 @@
   <title>Jimeng AI</title>
   <style>
     body {
-      width: 350px;
+      width: 380px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       padding: 16px;
       color: #333;
@@ -82,6 +82,12 @@
       gap: 8px;
     }
 
+    .grid-3 {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+    }
+
     #gallery {
       margin-top: 16px;
       display: grid;
@@ -90,6 +96,13 @@
     }
 
     #gallery img {
+      width: 100%;
+      border-radius: 4px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+      cursor: pointer;
+    }
+
+    #gallery video {
       width: 100%;
       border-radius: 4px;
       box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
@@ -136,30 +149,45 @@
     .success {
       color: #388e3c;
     }
-  </style>
-</head>
 
-<body>
-  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-    <h1 style="margin:0; font-size:16px;">Jimeng AI</h1>
-    <div style="background:#eee; padding:2px; border-radius:6px; display:flex;">
-      <button id="btn-cn" class="toggle-btn">Jimeng</button>
-      <button id="btn-us" class="toggle-btn">Dreamina</button>
-    </div>
-  </div>
+    /* Mode toggle styles */
+    .mode-toggle {
+      background: #f0f0f0;
+      padding: 3px;
+      border-radius: 8px;
+      display: flex;
+      margin-bottom: 12px;
+    }
 
-  <div id="connection-status"
-    style="font-size:11px; margin-bottom:12px; padding:6px; background:#f5f5f5; border-radius:4px; display:flex; justify-content:space-between; align-items:center;">
-    <span id="region-badge">Detecting...</span>
-    <span id="user-id" style="color:#888;"></span>
-  </div>
+    .mode-btn {
+      flex: 1;
+      background: transparent;
+      border: none;
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      border-radius: 6px;
+      color: #666;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
 
-  <div style="margin-bottom: 12px; text-align: right;">
-    <a href="#" id="api-panel-link" style="font-size: 11px; color: #2196f3; text-decoration: none;">⚙️ 打开 API 控制面板</a>
-  </div>
+    .mode-btn.active {
+      background: #fff;
+      color: #000;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+    }
 
-  <style>
+    /* Region toggle styles */
+    .region-toggle {
+      background: #eee;
+      padding: 2px;
+      border-radius: 6px;
+      display: flex;
+    }
+
     .toggle-btn {
+      flex: 1;
       background: transparent;
       border: none;
       padding: 4px 8px;
@@ -167,6 +195,7 @@
       cursor: pointer;
       border-radius: 4px;
       color: #666;
+      font-weight: 500;
       width: auto;
     }
 
@@ -174,53 +203,246 @@
       background: #fff;
       color: #000;
       box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
-      font-weight: bold;
+    }
+
+    /* Section visibility */
+    .video-section {
+      display: none;
+    }
+
+    .video-section.visible {
+      display: block;
+    }
+
+    .image-section {
+      display: block;
+    }
+
+    .image-section.hidden {
+      display: none;
+    }
+
+    /* Frame image upload */
+    .frame-upload {
+      margin-bottom: 12px;
+    }
+
+    .frame-upload label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      font-weight: normal;
+      font-size: 11px;
+      color: #666;
+    }
+
+    .frame-upload input[type="file"] {
+      display: none;
+    }
+
+    .frame-preview {
+      width: 40px;
+      height: 40px;
+      border-radius: 4px;
+      object-fit: cover;
+      border: 1px solid #ddd;
+    }
+
+    /* Video result container */
+    .video-result {
+      margin-top: 12px;
+      padding: 12px;
+      background: #f8f8f8;
+      border-radius: 8px;
+    }
+
+    .video-result video {
+      width: 100%;
+      border-radius: 6px;
+    }
+
+    .video-result a {
+      display: block;
+      margin-top: 8px;
+      text-align: center;
+      font-size: 12px;
+      color: #2196f3;
+      text-decoration: none;
+    }
+
+    .video-result a:hover {
+      text-decoration: underline;
     }
   </style>
+</head>
 
-  <div style="margin-bottom: 12px;">
-    <label for="jsonFile">Batch: Upload JSON File</label>
-    <input type="file" id="jsonFile" accept=".json" style="margin-bottom: 8px;">
-    <div style="font-size: 11px; color: #666; margin-bottom: 4px;">— or paste JSON below —</div>
-    <textarea id="jsonPaste" placeholder="Paste JSON content here...
+<body>
+  <!-- Header with Region Toggle -->
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+    <h1 style="margin:0; font-size:16px;">Jimeng AI</h1>
+    <div class="region-toggle">
+      <button id="btn-cn" class="toggle-btn" title="中国区">CN</button>
+      <button id="btn-asia" class="toggle-btn" title="亚洲区">Asia</button>
+      <button id="btn-us" class="toggle-btn" title="美国区">US</button>
+    </div>
+  </div>
+
+  <!-- Connection Status -->
+  <div id="connection-status"
+    style="font-size:11px; margin-bottom:12px; padding:6px; background:#f5f5f5; border-radius:4px; display:flex; justify-content:space-between; align-items:center;">
+    <span id="region-badge">Detecting...</span>
+    <span id="user-id" style="color:#888;"></span>
+  </div>
+
+  <!-- API Panel Link -->
+  <div style="margin-bottom: 12px; text-align: right;">
+    <a href="#" id="api-panel-link" style="font-size: 11px; color: #2196f3; text-decoration: none;">⚙️ 打开 API 控制面板</a>
+  </div>
+
+  <!-- Mode Toggle: Image / Video -->
+  <label style="margin-bottom: 4px;">Generation Mode</label>
+  <div class="mode-toggle">
+    <button id="mode-image" class="mode-btn active">🖼️ Image</button>
+    <button id="mode-video" class="mode-btn">🎬 Video</button>
+  </div>
+
+  <!-- Batch Processing Section (Image mode only) -->
+  <div id="batch-section" class="image-section">
+    <div style="margin-bottom: 12px;">
+      <label for="jsonFile">Batch: Upload JSON File</label>
+      <input type="file" id="jsonFile" accept=".json" style="margin-bottom: 8px;">
+      <div style="font-size: 11px; color: #666; margin-bottom: 4px;">— or paste JSON below —</div>
+      <textarea id="jsonPaste" placeholder="Paste JSON content here...
 {
   &quot;items&quot;: {
     &quot;scene1&quot;: {&quot;name&quot;: &quot;场景1&quot;, &quot;prompt&quot;: &quot;description...&quot;}
   }
 }" style="min-height: 60px; font-size: 11px; margin-bottom: 4px;"></textarea>
-    <button id="btnParseJson" style="width: auto; padding: 4px 12px; font-size: 11px; margin-bottom: 4px;">Parse JSON</button>
-    <div id="batchStatus" style="font-size: 11px; color: #666; margin-top: 4px;"></div>
-  </div>
-
-  <label for="prompt">Single Prompt</label>
-  <textarea id="prompt" placeholder="Describe your imagination (for single generation)..."></textarea>
-
-  <div class="grid">
-    <div>
-      <label for="model">Model</label>
-      <select id="model">
-        <option value="jimeng-4.5">Jimeng 4.5</option>
-        <option value="jimeng-4.1">Jimeng 4.1</option>
-        <option value="jimeng-4.0">Jimeng 4.0</option>
-        <option value="jimeng-3.0">Jimeng 3.0</option>
-      </select>
-    </div>
-    <div>
-      <label for="ratio">Ratio</label>
-      <select id="ratio">
-        <option value="1:1">1:1 (Square)</option>
-        <option value="16:9">16:9 (Landscape)</option>
-        <option value="9:16">9:16 (Portrait)</option>
-        <option value="4:3">4:3</option>
-        <option value="3:4">3:4</option>
-      </select>
+      <button id="btnParseJson" style="width: auto; padding: 4px 12px; font-size: 11px; margin-bottom: 4px;">Parse JSON</button>
+      <div id="batchStatus" style="font-size: 11px; color: #666; margin-top: 4px;"></div>
     </div>
   </div>
 
+  <!-- Prompt Input -->
+  <label for="prompt">Prompt</label>
+  <textarea id="prompt" placeholder="Describe your imagination..."></textarea>
+
+  <!-- Image Mode Options -->
+  <div id="image-options" class="image-section">
+    <div class="grid">
+      <div>
+        <label for="image-model">Image Model</label>
+        <select id="image-model">
+          <option value="jimeng-4.5">Jimeng 4.5</option>
+          <option value="jimeng-4.1">Jimeng 4.1</option>
+          <option value="jimeng-4.0">Jimeng 4.0</option>
+          <option value="jimeng-3.0">Jimeng 3.0</option>
+        </select>
+      </div>
+      <div>
+        <label for="image-ratio">Ratio</label>
+        <select id="image-ratio">
+          <option value="1:1">1:1 (Square)</option>
+          <option value="16:9">16:9 (Landscape)</option>
+          <option value="9:16">9:16 (Portrait)</option>
+          <option value="4:3">4:3</option>
+          <option value="3:4">3:4</option>
+        </select>
+      </div>
+    </div>
+    <div style="margin-bottom: 12px;">
+      <label for="image-resolution">Resolution</label>
+      <select id="image-resolution">
+        <option value="1k">1K (Fast)</option>
+        <option value="2k" selected>2K (Standard)</option>
+        <option value="4k">4K (High Quality)</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Video Mode Options -->
+  <div id="video-options" class="video-section">
+    <div class="grid">
+      <div>
+        <label for="video-model">Video Model</label>
+        <select id="video-model">
+          <option value="jimeng-video-3.5-pro">Video 3.5 Pro</option>
+          <option value="jimeng-video-3.0-pro">Video 3.0 Pro</option>
+          <option value="jimeng-video-3.0">Video 3.0</option>
+          <option value="jimeng-video-3.0-fast">Video 3.0 Fast</option>
+          <option value="jimeng-video-2.0">Video 2.0</option>
+          <option value="jimeng-video-2.0-pro">Video 2.0 Pro</option>
+        </select>
+      </div>
+      <div>
+        <label for="video-ratio">Aspect Ratio</label>
+        <select id="video-ratio">
+          <option value="1:1">1:1 (Square)</option>
+          <option value="16:9" selected>16:9 (Landscape)</option>
+          <option value="9:16">9:16 (Portrait)</option>
+          <option value="4:3">4:3</option>
+          <option value="3:4">3:4</option>
+        </select>
+      </div>
+    </div>
+    <div class="grid">
+      <div>
+        <label for="video-duration">Duration</label>
+        <select id="video-duration">
+          <option value="5">5 seconds</option>
+          <option value="10">10 seconds</option>
+        </select>
+      </div>
+      <div>
+        <label for="video-quality">Quality</label>
+        <select id="video-quality">
+          <option value="720p">720p</option>
+          <option value="1080p" selected>1080p</option>
+        </select>
+      </div>
+    </div>
+    
+    <!-- Frame Images Upload -->
+    <div style="margin-top: 8px; padding: 10px; background: #f8f8f8; border-radius: 6px;">
+      <label style="font-size: 11px; color: #666; margin-bottom: 8px;">Frame Images (Optional)</label>
+      <div style="display: flex; gap: 12px;">
+        <div class="frame-upload">
+          <label for="first-frame">
+            <input type="file" id="first-frame" accept="image/*">
+            <span>📷 First Frame</span>
+            <img id="first-frame-preview" class="frame-preview" style="display: none; margin-left: 8px;">
+          </label>
+        </div>
+        <div class="frame-upload">
+          <label for="end-frame">
+            <input type="file" id="end-frame" accept="image/*">
+            <span>📷 End Frame</span>
+            <img id="end-frame-preview" class="frame-preview" style="display: none; margin-left: 8px;">
+          </label>
+        </div>
+      </div>
+      <div id="frame-status" style="font-size: 10px; color: #888; margin-top: 6px;"></div>
+    </div>
+  </div>
+
+  <!-- Generate Button -->
   <button id="generateBtn">Generate Image</button>
 
+  <!-- Status -->
   <div id="status"></div>
+  
+  <!-- Progress -->
+  <div id="batchProgress"></div>
+
+  <!-- Results Gallery -->
   <div id="gallery"></div>
+
+  <!-- Video Result Container -->
+  <div id="video-result" class="video-result" style="display: none;">
+    <video id="video-player" controls></video>
+    <a id="video-download" href="#" target="_blank">Download Video</a>
+  </div>
 
   <script src="popup.js"></script>
 </body>

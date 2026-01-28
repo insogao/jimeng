@@ -6,12 +6,20 @@ import {
     BASE_URL_DREAMINA_US,
     BASE_URL_HK_COMMERCE,
     BASE_URL_HK,
+    BASE_URL_IMAGEX_CN,
+    BASE_URL_IMAGEX_US,
+    BASE_URL_IMAGEX_HK,
     ASSISTANT_IDS,
     MODELS,
+    getImageModels,
     PLATFORM_CODE,
-    VERSION_CODE
+    VERSION_CODE,
+    REGION_CN,
+    REGION_US,
+    REGION_ASIA,
+    getRegionConfig
 } from './lib/consts.js';
-import { resolveResolution, buildGeneratePayload } from './lib/payload.js';
+import { resolveResolution, buildGeneratePayload, buildVideoGeneratePayload, extractVideoUrl } from './lib/payload.js';
 
 /*
  * Detect Region and return Routing Info
@@ -248,6 +256,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Keep-alive ping, just respond
         sendResponse({ pong: true, timestamp: Date.now() });
     }
+
+    if (message.action === "GENERATE_VIDEO") {
+        console.log("[BG] Received Video Generate Request:", message.payload);
+        handleGenerateVideo(message.payload).then(response => {
+            console.log("[BG] Sending Video Response back to Popup:", response);
+            sendResponse(response);
+        });
+        return true; // Keep channel open for async response
+    }
+
+    if (message.action === "GENERATE_VIDEO_ASYNC") {
+        console.log("[BG] Received Async Video Generate Request:", message.payload);
+        handleGenerateVideoAsync(message.payload).then(response => {
+            sendResponse(response);
+        });
+        return true;
+    }
 });
 
 // Store pending results for async polling
@@ -313,7 +338,9 @@ async function handleGenerateAsync(userPayload) {
     try {
         const region = await detectRegion(false, userPayload.preferredRegion);
         const userModel = userPayload.model || "jimeng-4.5";
-        const mappedModel = MODELS[userModel] || MODELS["jimeng-4.5"];
+        const regionType = userPayload.preferredRegion || REGION_CN;
+        const imageModels = getImageModels(regionType);
+        const mappedModel = imageModels[userModel] || MODELS["jimeng-4.5"];
 
         const resolution = resolveResolution(
             userModel,
@@ -488,7 +515,9 @@ async function handleGenerate(userPayload) {
 
         // Resolve Resolution
         const userModel = userPayload.model || "jimeng-4.5";
-        const mappedModel = MODELS[userModel] || MODELS["jimeng-4.5"];
+        const regionType = userPayload.preferredRegion || REGION_CN;
+        const imageModels = getImageModels(regionType);
+        const mappedModel = imageModels[userModel] || MODELS["jimeng-4.5"];
         console.log(`[BG] Locking model: ${userModel} -> ${mappedModel}`);
 
         const resolution = resolveResolution(
@@ -754,3 +783,664 @@ async function getExternalStatus() {
 }
 
 console.log('[BG] Native Messaging IPC initialized');
+
+// ==================== Video Generation Functions ====================
+
+// Store pending video results for async polling
+const pendingVideoResults = new Map();
+const STORAGE_KEY_VIDEO = 'jimeng_pending_video_batch';
+
+// Load pending video tasks from storage on startup
+chrome.storage.local.get([STORAGE_KEY_VIDEO], (result) => {
+    if (result[STORAGE_KEY_VIDEO]) {
+        const tasks = result[STORAGE_KEY_VIDEO];
+        console.log(`[BG] Loaded ${tasks.length} pending video tasks from storage`);
+        tasks.forEach(task => {
+            pendingVideoResults.set(task.historyId, {
+                region: task.region,
+                promptName: task.promptName,
+                startTime: task.startTime || Date.now(),
+                attempts: task.attempts || 0
+            });
+            // Resume polling
+            pollSingleVideoResult(task.historyId);
+        });
+    }
+});
+
+// Save pending video tasks to storage
+async function savePendingVideoTasks() {
+    const tasks = [];
+    pendingVideoResults.forEach((value, historyId) => {
+        tasks.push({
+            historyId,
+            region: value.region,
+            promptName: value.promptName,
+            startTime: value.startTime,
+            attempts: value.attempts
+        });
+    });
+    await chrome.storage.local.set({ [STORAGE_KEY_VIDEO]: tasks });
+}
+
+// Helper: Sleep function
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Upload frame image to ImageX using the full AWS signature flow
+ * Based on jimeng-api/src/lib/image-uploader.ts
+ */
+async function uploadFrameImage(base64Data, region) {
+    console.log(`[BG] Starting frame image upload for region: ${region.code}`);
+    
+    try {
+        // Parse base64 data
+        const match = base64Data.match(/^data:image\/(\w+);base64,(.+)$/);
+        if (!match) {
+            throw new Error("Invalid base64 image data");
+        }
+        
+        const imageType = match[1];
+        const base64Content = match[2];
+        const imageBuffer = Uint8Array.from(atob(base64Content), c => c.charCodeAt(0));
+        const fileSize = imageBuffer.length;
+        const filename = `frame_${Date.now()}.${imageType}`;
+        
+        console.log(`[BG] Frame image: ${filename}, size: ${fileSize} bytes`);
+
+        // Step 1: Get upload token using apiRequest
+        const tokenResult = await apiRequest("/mweb/v1/get_upload_token", region, {
+            data: { scene: 2 }
+        });
+
+        if (!tokenResult?.data?.access_key_id) {
+            throw new Error("Failed to get upload token: " + JSON.stringify(tokenResult));
+        }
+
+        const { 
+            access_key_id, 
+            secret_access_key, 
+            session_token,
+            service_id,
+            space_name 
+        } = tokenResult.data;
+        
+        const actualServiceId = region.regionType === REGION_CN ? service_id : space_name;
+        
+        console.log(`[BG] Got upload token, service_id: ${actualServiceId}`);
+
+        // Step 2: Calculate CRC32
+        const crc32 = calculateCRC32(imageBuffer);
+        
+        // Step 3: Apply for upload permission (ApplyImageUpload)
+        const now = new Date();
+        const timestamp = now.toISOString().replace(/[:-]/g, '').replace(/\.\d{3}Z$/, 'Z');
+        const randomStr = Math.random().toString(36).substring(2, 12);
+        
+        // Get ImageX base URL based on region
+        let imagexBaseUrl;
+        if (region.regionType === REGION_CN) {
+            imagexBaseUrl = BASE_URL_IMAGEX_CN;
+        } else if (region.regionType === REGION_US) {
+            imagexBaseUrl = BASE_URL_IMAGEX_US;
+        } else {
+            imagexBaseUrl = BASE_URL_IMAGEX_HK;
+        }
+        
+        const applyUrl = `${imagexBaseUrl}/?Action=ApplyImageUpload&Version=2018-08-01&ServiceId=${actualServiceId}&FileSize=${fileSize}&s=${randomStr}${region.regionType !== REGION_CN ? '&device_platform=web' : ''}`;
+        
+        // Create AWS Signature V4
+        const awsRegion = region.awsRegion || 'cn-north-1';
+        const authorization = await createAWSSignature('GET', applyUrl, {
+            'x-amz-date': timestamp,
+            'x-amz-security-token': session_token
+        }, access_key_id, secret_access_key, session_token, '', awsRegion);
+        
+        console.log(`[BG] Applying for upload permission...`);
+        
+        const applyResponse = await fetch(applyUrl, {
+            method: 'GET',
+            headers: {
+                'accept': '*/*',
+                'authorization': authorization,
+                'origin': region.origin,
+                'referer': `${region.origin}/ai-tool/generate`,
+                'x-amz-date': timestamp,
+                'x-amz-security-token': session_token,
+            }
+        });
+        
+        const applyResult = await applyResponse.json();
+        
+        if (applyResult?.ResponseMetadata?.Error) {
+            throw new Error(`Apply upload failed: ${JSON.stringify(applyResult.ResponseMetadata.Error)}`);
+        }
+        
+        const uploadAddress = applyResult?.Result?.UploadAddress;
+        if (!uploadAddress?.StoreInfos?.[0] || !uploadAddress?.UploadHosts?.[0]) {
+            throw new Error(`Invalid upload address: ${JSON.stringify(applyResult)}`);
+        }
+        
+        const storeInfo = uploadAddress.StoreInfos[0];
+        const uploadHost = uploadAddress.UploadHosts[0];
+        const uploadUrl = `https://${uploadHost}/upload/v1/${storeInfo.StoreUri}`;
+        
+        console.log(`[BG] Uploading to: ${uploadUrl}`);
+        
+        // Step 4: Upload the image
+        const uploadResponse = await fetch(uploadUrl, {
+            method: 'POST',
+            headers: {
+                'Authorization': storeInfo.Auth,
+                'Content-CRC32': crc32,
+                'Content-Type': 'application/octet-stream',
+                'Content-Disposition': `attachment; filename="${filename}"`,
+            },
+            body: imageBuffer
+        });
+        
+        if (!uploadResponse.ok) {
+            const errorText = await uploadResponse.text();
+            throw new Error(`Upload failed: ${uploadResponse.status} - ${errorText}`);
+        }
+        
+        console.log(`[BG] Image uploaded successfully`);
+        
+        // Step 5: Commit the upload
+        const commitUrl = `${imagexBaseUrl}/?Action=CommitImageUpload&Version=2018-08-01&ServiceId=${actualServiceId}`;
+        const commitTimestamp = new Date().toISOString().replace(/[:-]/g, '').replace(/\.\d{3}Z$/, 'Z');
+        const commitPayload = JSON.stringify({ SessionKey: uploadAddress.SessionKey });
+        
+        const payloadHash = await sha256(commitPayload);
+        
+        const commitAuthorization = await createAWSSignature('POST', commitUrl, {
+            'x-amz-date': commitTimestamp,
+            'x-amz-security-token': session_token,
+            'x-amz-content-sha256': payloadHash
+        }, access_key_id, secret_access_key, session_token, commitPayload, awsRegion);
+        
+        const commitResponse = await fetch(commitUrl, {
+            method: 'POST',
+            headers: {
+                'accept': '*/*',
+                'authorization': commitAuthorization,
+                'content-type': 'application/json',
+                'x-amz-date': commitTimestamp,
+                'x-amz-security-token': session_token,
+                'x-amz-content-sha256': payloadHash,
+            },
+            body: commitPayload
+        });
+        
+        const commitResult = await commitResponse.json();
+        
+        if (commitResult?.ResponseMetadata?.Error) {
+            throw new Error(`Commit failed: ${JSON.stringify(commitResult.ResponseMetadata.Error)}`);
+        }
+        
+        const uploadResult = commitResult?.Result?.Results?.[0];
+        if (!uploadResult || uploadResult.UriStatus !== 2000) {
+            throw new Error(`Commit returned invalid status: ${JSON.stringify(uploadResult)}`);
+        }
+        
+        console.log(`[BG] Frame upload complete: ${uploadResult.Uri}`);
+        return uploadResult.Uri;
+        
+    } catch (error) {
+        console.error("[BG] Frame upload error:", error);
+        throw error;
+    }
+}
+
+/**
+ * Calculate CRC32 checksum
+ */
+function calculateCRC32(buffer) {
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let j = 0; j < 8; j++) {
+            c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        }
+        table[i] = c;
+    }
+    
+    let crc = -1;
+    for (let i = 0; i < buffer.length; i++) {
+        crc = table[(crc ^ buffer[i]) & 0xFF] ^ (crc >>> 8);
+    }
+    
+    return ((crc ^ -1) >>> 0).toString(16).toUpperCase().padStart(8, '0');
+}
+
+/**
+ * Calculate SHA256 hash
+ */
+async function sha256(message) {
+    const msgBuffer = new TextEncoder().encode(message);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Create AWS Signature V4
+ * Async implementation using crypto.subtle for ImageX
+ */
+async function createAWSSignature(method, url, headers, accessKey, secretKey, sessionToken, payload, region) {
+    const parsedUrl = new URL(url);
+    const host = parsedUrl.hostname;
+    const path = parsedUrl.pathname;
+    const query = parsedUrl.search.slice(1); // Remove leading ?
+    
+    // Get timestamp from headers
+    const amzDate = headers['x-amz-date'];
+    const dateStamp = amzDate.slice(0, 8);
+    
+    // Calculate payload hash
+    const payloadHash = headers['x-amz-content-sha256'] || await sha256('');
+    
+    // Create canonical request
+    const canonicalHeaders = `host:${host}\n` +
+        `x-amz-content-sha256:${payloadHash}\n` +
+        `x-amz-date:${amzDate}\n` +
+        `x-amz-security-token:${sessionToken}\n`;
+    
+    const signedHeaders = 'host;x-amz-content-sha256;x-amz-date;x-amz-security-token';
+    
+    const canonicalRequest = [
+        method,
+        path,
+        query,
+        canonicalHeaders,
+        signedHeaders,
+        payloadHash
+    ].join('\n');
+    
+    // Create string to sign
+    const algorithm = 'AWS4-HMAC-SHA256';
+    const credentialScope = `${dateStamp}/${region}/iam/aws4_request`;
+    
+    // Calculate SHA256 of canonical request
+    const canonicalRequestHash = await sha256(canonicalRequest);
+    
+    const stringToSign = [
+        algorithm,
+        amzDate,
+        credentialScope,
+        canonicalRequestHash
+    ].join('\n');
+    
+    // Calculate signature
+    const signingKey = await getSignatureKey(secretKey, dateStamp, region, 'iam');
+    const signature = await hmacSHA256Hex(signingKey, stringToSign);
+    
+    return `${algorithm} Credential=${accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+}
+
+/**
+ * Get AWS Signature Key
+ */
+async function getSignatureKey(key, dateStamp, regionName, serviceName) {
+    const kDate = await hmacSHA256(('AWS4' + key), dateStamp);
+    const kRegion = await hmacSHA256(kDate, regionName);
+    const kService = await hmacSHA256(kRegion, serviceName);
+    const kSigning = await hmacSHA256(kService, 'aws4_request');
+    return kSigning;
+}
+
+/**
+ * HMAC SHA256 using crypto.subtle
+ */
+async function hmacSHA256(key, message) {
+    const encoder = new TextEncoder();
+    
+    let keyData;
+    if (typeof key === 'string') {
+        keyData = encoder.encode(key);
+    } else {
+        keyData = key;
+    }
+    
+    const messageData = encoder.encode(message);
+    
+    const cryptoKey = await crypto.subtle.importKey(
+        'raw',
+        keyData,
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign']
+    );
+    
+    const signature = await crypto.subtle.sign('HMAC', cryptoKey, messageData);
+    return new Uint8Array(signature);
+}
+
+/**
+ * HMAC SHA256 and return hex string
+ */
+async function hmacSHA256Hex(key, message) {
+    const signature = await hmacSHA256(key, message);
+    return Array.from(signature)
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+}
+
+/**
+ * Handle video generation request
+ */
+async function handleGenerateVideo(userPayload) {
+    try {
+        console.log("[BG] Video Generation - Step 1: Getting region config...");
+        
+        // Get region config using the new three-region system
+        const regionType = userPayload.preferredRegion || REGION_CN;
+        const region = getRegionConfig(regionType);
+        
+        console.log(`[BG] Region: ${region.code}, aid: ${region.aid}, URL: ${region.urls.default}`);
+
+        // Upload frame images if provided
+        let firstFrameUri = null;
+        let endFrameUri = null;
+        
+        if (userPayload.firstFrameImage) {
+            console.log("[BG] Uploading first frame image...");
+            try {
+                firstFrameUri = await uploadFrameImage(userPayload.firstFrameImage, region);
+                console.log(`[BG] First frame uploaded: ${firstFrameUri}`);
+            } catch (err) {
+                console.error("[BG] First frame upload failed:", err);
+                // Continue without first frame
+            }
+        }
+        
+        if (userPayload.endFrameImage) {
+            console.log("[BG] Uploading end frame image...");
+            try {
+                endFrameUri = await uploadFrameImage(userPayload.endFrameImage, region);
+                console.log(`[BG] End frame uploaded: ${endFrameUri}`);
+            } catch (err) {
+                console.error("[BG] End frame upload failed:", err);
+                // Continue without end frame
+            }
+        }
+
+        // Build video generation payload
+        console.log("[BG] Building video generation payload...");
+        const buildResult = buildVideoGeneratePayload({
+            userModel: userPayload.model,
+            prompt: userPayload.prompt,
+            ratio: userPayload.ratio,
+            resolution: userPayload.resolution,
+            duration: userPayload.duration,
+            regionInfo: { aid: region.aid, regionType: region.regionType },
+            firstFrameImage: firstFrameUri,
+            endFrameImage: endFrameUri
+        });
+        
+        console.log("[BG] Submitting video generation request...");
+        const genRes = await apiRequest("/mweb/v1/aigc_draft/generate", region, {
+            data: buildResult.payload
+        });
+        
+        console.log("[BG] Video generation response:", JSON.stringify(genRes));
+        
+        if (!genRes?.data?.aigc_data?.history_record_id) {
+            return { 
+                success: false, 
+                error: genRes?.errmsg || "API Error: Failed to start video generation." 
+            };
+        }
+        
+        const historyId = genRes.data.aigc_data.history_record_id;
+        console.log(`[BG] Video generation started! History ID: ${historyId}`);
+        
+        // Poll for video result
+        return await pollVideoResult(historyId, region);
+        
+    } catch (err) {
+        console.error("[BG] Video Generation Error:", err);
+        return { success: false, error: err.message };
+    }
+}
+
+/**
+ * Handle async video generation (fire-and-forget)
+ */
+async function handleGenerateVideoAsync(userPayload) {
+    try {
+        const regionType = userPayload.preferredRegion || REGION_CN;
+        const region = getRegionConfig(regionType);
+        
+        // Upload frame images if provided
+        let firstFrameUri = null;
+        let endFrameUri = null;
+        
+        if (userPayload.firstFrameImage) {
+            try {
+                firstFrameUri = await uploadFrameImage(userPayload.firstFrameImage, region);
+            } catch (err) {
+                console.error("[BG] First frame upload failed:", err);
+            }
+        }
+        
+        if (userPayload.endFrameImage) {
+            try {
+                endFrameUri = await uploadFrameImage(userPayload.endFrameImage, region);
+            } catch (err) {
+                console.error("[BG] End frame upload failed:", err);
+            }
+        }
+
+        const buildResult = buildVideoGeneratePayload({
+            userModel: userPayload.model,
+            prompt: userPayload.prompt,
+            ratio: userPayload.ratio,
+            resolution: userPayload.resolution,
+            duration: userPayload.duration,
+            regionInfo: { aid: region.aid, regionType: region.regionType },
+            firstFrameImage: firstFrameUri,
+            endFrameImage: endFrameUri
+        });
+        
+        const genRes = await apiRequest("/mweb/v1/aigc_draft/generate", region, {
+            data: buildResult.payload
+        });
+        
+        if (!genRes?.data?.aigc_data?.history_record_id) {
+            return { 
+                success: false, 
+                error: genRes?.errmsg || "Failed to start video generation." 
+            };
+        }
+        
+        const historyId = genRes.data.aigc_data.history_record_id;
+        const promptName = userPayload.promptName || 'Unnamed';
+        
+        // Store for background polling
+        pendingVideoResults.set(historyId, {
+            region,
+            promptName,
+            startTime: Date.now(),
+            attempts: 0
+        });
+        
+        await savePendingVideoTasks();
+        startKeepAlive();
+        pollSingleVideoResult(historyId);
+        
+        return { success: true, historyId, promptName, submitted: true };
+        
+    } catch (err) {
+        console.error("[BG] Async Video Generation Error:", err);
+        return { success: false, error: err.message };
+    }
+}
+
+/**
+ * Poll for video generation result (blocking)
+ */
+async function pollVideoResult(historyId, region) {
+    console.log(`[BG] Polling for video result: ${historyId}`);
+    
+    let attempts = 0;
+    const maxAttempts = 120; // 10 minutes (5s * 120)
+    
+    while (attempts < maxAttempts) {
+        await sleep(5000);
+        attempts++;
+        
+        console.log(`[BG] Video poll attempt ${attempts}...`);
+        
+        try {
+            const pollRes = await apiRequest("/mweb/v1/get_history_by_ids", region, {
+                data: {
+                    history_ids: [historyId],
+                    image_info: { width: 2048, height: 2048, format: "webp" }
+                }
+            });
+            
+            const record = pollRes.data?.[historyId];
+            if (!record) {
+                console.log(`[BG] No record found for ${historyId}, continuing...`);
+                continue;
+            }
+            
+            console.log(`[BG] Video status: ${record.status}`);
+            
+            // Status 10 = Success, 50 = Completed
+            if (record.status === 10 || record.status === 50) {
+                const items = record.item_list || [];
+                
+                // Extract video URL from the first item
+                for (const item of items) {
+                    const videoUrl = extractVideoUrl(item);
+                    if (videoUrl) {
+                        console.log(`[BG] Video generation complete! URL: ${videoUrl}`);
+                        return { success: true, videoUrl };
+                    }
+                }
+                
+                console.log("[BG] Status is success but no video URL found, waiting...");
+            } else if (record.status === 30) {
+                console.error("[BG] Video generation failed on server side.");
+                return { success: false, error: "Video generation failed server-side." };
+            }
+            // Status 20 = Processing, continue polling
+            
+        } catch (err) {
+            console.error(`[BG] Poll error:`, err);
+        }
+    }
+    
+    return { success: false, error: "Timeout waiting for video generation." };
+}
+
+/**
+ * Background polling for single video result
+ */
+async function pollSingleVideoResult(historyId) {
+    const pending = pendingVideoResults.get(historyId);
+    if (!pending) return;
+    
+    if (pending.attempts >= 120) {
+        console.log(`[BG] Video polling timeout for ${historyId}`);
+        pendingVideoResults.delete(historyId);
+        await savePendingVideoTasks();
+        return;
+    }
+    
+    await sleep(5000);
+    pending.attempts++;
+    await savePendingVideoTasks();
+    
+    try {
+        const pollRes = await apiRequest("/mweb/v1/get_history_by_ids", pending.region, {
+            data: {
+                history_ids: [historyId],
+                image_info: { width: 2048, height: 2048, format: "webp" }
+            }
+        });
+        
+        const record = pollRes.data?.[historyId];
+        if (record) {
+            if (record.status === 10 || record.status === 50) {
+                // Success
+                const items = record.item_list || [];
+                let videoUrl = null;
+                
+                for (const item of items) {
+                    videoUrl = extractVideoUrl(item);
+                    if (videoUrl) break;
+                }
+                
+                // Store completed result
+                const completedKey = 'jimeng_completed_video_results';
+                const stored = await chrome.storage.local.get([completedKey]);
+                const completed = stored[completedKey] || [];
+                completed.push({
+                    historyId,
+                    promptName: pending.promptName,
+                    videoUrl,
+                    success: !!videoUrl,
+                    completedAt: Date.now()
+                });
+                if (completed.length > 100) completed.shift();
+                await chrome.storage.local.set({ [completedKey]: completed });
+                
+                // Send message to popup
+                chrome.runtime.sendMessage({
+                    action: "BATCH_VIDEO_RESULT",
+                    payload: {
+                        historyId,
+                        promptName: pending.promptName,
+                        videoUrl,
+                        success: !!videoUrl
+                    }
+                }).catch(() => {});
+                
+                pendingVideoResults.delete(historyId);
+                await savePendingVideoTasks();
+                return;
+                
+            } else if (record.status === 30) {
+                // Failed
+                const completedKey = 'jimeng_completed_video_results';
+                const stored = await chrome.storage.local.get([completedKey]);
+                const completed = stored[completedKey] || [];
+                completed.push({
+                    historyId,
+                    promptName: pending.promptName,
+                    videoUrl: null,
+                    success: false,
+                    error: "Generation failed",
+                    completedAt: Date.now()
+                });
+                await chrome.storage.local.set({ [completedKey]: completed });
+                
+                chrome.runtime.sendMessage({
+                    action: "BATCH_VIDEO_RESULT",
+                    payload: {
+                        historyId,
+                        promptName: pending.promptName,
+                        videoUrl: null,
+                        success: false
+                    }
+                }).catch(() => {});
+                
+                pendingVideoResults.delete(historyId);
+                await savePendingVideoTasks();
+                return;
+            }
+        }
+        
+        // Continue polling
+        pollSingleVideoResult(historyId);
+        
+    } catch (err) {
+        console.error(`[BG] Video poll error for ${historyId}:`, err);
+        pollSingleVideoResult(historyId);
+    }
+}

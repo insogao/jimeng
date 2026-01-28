@@ -4,28 +4,40 @@ let currentRegion = localStorage.getItem(REGION_KEY);
 let isBatchProcessing = false;
 let shouldStopBatch = false;
 
+// Current generation mode: 'image' or 'video'
+let currentMode = 'image';
+
+// Frame image data (base64)
+let firstFrameData = null;
+let endFrameData = null;
+
 // Listen for batch results from background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === "BATCH_RESULT") {
         handleBatchResult(message.payload);
     }
+    if (message.action === "BATCH_VIDEO_RESULT") {
+        handleBatchVideoResult(message.payload);
+    }
 });
 
 // Clear batch history
 async function clearBatchHistory() {
-    await chrome.storage.local.remove(['jimeng_completed_results', 'jimeng_pending_batch', BATCH_QUEUE_KEY]);
+    await chrome.storage.local.remove(['jimeng_completed_results', 'jimeng_pending_batch', 'jimeng_completed_video_results', 'jimeng_pending_video_batch', BATCH_QUEUE_KEY]);
     const progressContainer = document.getElementById('batchProgress');
     if (progressContainer) progressContainer.innerHTML = '';
     document.getElementById('gallery').innerHTML = '';
+    document.getElementById('video-result').style.display = 'none';
     document.getElementById('status').textContent = 'History cleared';
     document.getElementById('status').className = '';
-    displayedImages.clear(); // Clear tracked images
+    displayedImages.clear();
+    displayedVideos.clear();
     
     // Reset batch state
     window.isBatchMode = false;
     window.isResuming = false;
     window.batchPrompts = [];
-    document.getElementById('generateBtn').textContent = 'Generate Image';
+    updateGenerateButtonText();
 }
 
 // Restore pending and completed tasks when popup opens
@@ -33,15 +45,22 @@ async function restoreBatchState() {
     const statusEl = document.getElementById('status');
     const gallery = document.getElementById('gallery');
     
-    // Check for pending tasks
+    // Check for pending image tasks
     const pendingResult = await chrome.storage.local.get(['jimeng_pending_batch']);
     const pendingTasks = pendingResult['jimeng_pending_batch'] || [];
     
-    // Check for completed results
+    // Check for completed image results
     const completedResult = await chrome.storage.local.get(['jimeng_completed_results']);
     const completedTasks = completedResult['jimeng_completed_results'] || [];
     
-    if (pendingTasks.length > 0 || completedTasks.length > 0) {
+    // Check for completed video results
+    const completedVideoResult = await chrome.storage.local.get(['jimeng_completed_video_results']);
+    const completedVideoTasks = completedVideoResult['jimeng_completed_video_results'] || [];
+    
+    const totalCompleted = completedTasks.length + completedVideoTasks.length;
+    const totalPending = pendingTasks.length;
+    
+    if (totalPending > 0 || totalCompleted > 0) {
         // Create progress container
         let progressContainer = document.getElementById('batchProgress');
         if (!progressContainer) {
@@ -58,13 +77,12 @@ async function restoreBatchState() {
         clearBtn.onclick = clearBatchHistory;
         progressContainer.appendChild(clearBtn);
         
-        // Show completed tasks first
+        // Show completed image tasks
         completedTasks.slice().reverse().forEach(task => {
             const progressItem = document.createElement('div');
             progressItem.className = 'progress-item';
             if (task.success && task.images && task.images.length > 0) {
                 progressItem.innerHTML = `<span>${task.promptName}</span><span class="progress-success">✓ ${task.images.length} images</span>`;
-                // Add images to gallery (track displayed to prevent duplicates)
                 task.images.forEach(url => {
                     if (!displayedImages.has(url)) {
                         displayedImages.add(url);
@@ -81,6 +99,18 @@ async function restoreBatchState() {
             progressContainer.appendChild(progressItem);
         });
         
+        // Show completed video tasks
+        completedVideoTasks.slice().reverse().forEach(task => {
+            const progressItem = document.createElement('div');
+            progressItem.className = 'progress-item';
+            if (task.success && task.videoUrl) {
+                progressItem.innerHTML = `<span>${task.promptName}</span><span class="progress-success">✓ Video</span>`;
+            } else {
+                progressItem.innerHTML = `<span>${task.promptName}</span><span class="progress-error">✗ Failed</span>`;
+            }
+            progressContainer.appendChild(progressItem);
+        });
+        
         // Show pending tasks
         pendingTasks.forEach(task => {
             const progressItem = document.createElement('div');
@@ -89,32 +119,82 @@ async function restoreBatchState() {
             progressContainer.appendChild(progressItem);
         });
         
-        statusEl.textContent = `${completedTasks.length} completed, ${pendingTasks.length} pending`;
+        statusEl.textContent = `${totalCompleted} completed, ${totalPending} pending`;
         statusEl.className = pendingTasks.length > 0 ? '' : 'success';
     }
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
     updateToggleUI();
+    updateVideoModelOptions(); // 初始化视频模型选项
     checkStatus();
     restoreBatchState();
     
     // Check if there's a batch to resume
     await resumeBatchIfNeeded();
 
+    // Region toggle - 三大区：CN (中国), ASIA (亚洲), US (美国)
     document.getElementById('btn-cn').addEventListener('click', () => setRegion('CN'));
+    document.getElementById('btn-asia').addEventListener('click', () => setRegion('ASIA'));
     document.getElementById('btn-us').addEventListener('click', () => setRegion('US'));
+    
+    // Mode toggle
+    document.getElementById('mode-image').addEventListener('click', () => setMode('image'));
+    document.getElementById('mode-video').addEventListener('click', () => setMode('video'));
     
     // File upload handler
     document.getElementById('jsonFile').addEventListener('change', handleFileUpload);
+    
+    // Frame image upload handlers
+    document.getElementById('first-frame').addEventListener('change', handleFirstFrameUpload);
+    document.getElementById('end-frame').addEventListener('change', handleEndFrameUpload);
 });
+
+// Mode switching
+function setMode(mode) {
+    currentMode = mode;
+    
+    // Update UI
+    document.getElementById('mode-image').classList.toggle('active', mode === 'image');
+    document.getElementById('mode-video').classList.toggle('active', mode === 'video');
+    
+    // Show/hide sections
+    document.getElementById('image-options').classList.toggle('hidden', mode !== 'image');
+    document.getElementById('image-options').classList.toggle('image-section', mode === 'image');
+    document.getElementById('batch-section').classList.toggle('hidden', mode !== 'image');
+    document.getElementById('video-options').classList.toggle('visible', mode === 'video');
+    
+    // Update button text
+    updateGenerateButtonText();
+    
+    // Clear gallery and video result
+    document.getElementById('gallery').innerHTML = '';
+    document.getElementById('video-result').style.display = 'none';
+}
+
+function updateGenerateButtonText() {
+    const btn = document.getElementById('generateBtn');
+    if (isBatchProcessing) {
+        btn.textContent = 'Stop Batch';
+    } else if (window.isBatchMode && window.batchPrompts && window.batchPrompts.length > 0) {
+        const remaining = window.batchPrompts.length - (window.batchCurrentIndex || 0);
+        btn.textContent = window.isResuming ? `Continue Batch (${remaining})` : `Start Batch (${window.batchPrompts.length})`;
+    } else {
+        btn.textContent = currentMode === 'image' ? 'Generate Image' : 'Generate Video';
+    }
+}
 
 function updateToggleUI() {
     const btnCn = document.getElementById('btn-cn');
+    const btnAsia = document.getElementById('btn-asia');
     const btnUs = document.getElementById('btn-us');
+    
     btnCn.classList.remove('active');
+    btnAsia.classList.remove('active');
     btnUs.classList.remove('active');
+    
     if (currentRegion === 'CN') btnCn.classList.add('active');
+    else if (currentRegion === 'ASIA') btnAsia.classList.add('active');
     else if (currentRegion === 'US') btnUs.classList.add('active');
 }
 
@@ -122,7 +202,53 @@ function setRegion(code) {
     currentRegion = code;
     localStorage.setItem(REGION_KEY, code);
     updateToggleUI();
+    updateVideoModelOptions(); // 更新视频模型选项
     checkStatus();
+}
+
+// 根据当前区域更新视频模型选项
+function updateVideoModelOptions() {
+    const videoModelSelect = document.getElementById('video-model');
+    const region = currentRegion || 'CN';
+    
+    // 清空现有选项
+    videoModelSelect.innerHTML = '';
+    
+    // 根据区域定义可用的视频模型
+    const videoModels = {
+        'CN': [
+            { value: 'jimeng-video-3.5-pro', label: 'Video 3.5 Pro' },
+            { value: 'jimeng-video-3.0-pro', label: 'Video 3.0 Pro' },
+            { value: 'jimeng-video-3.0', label: 'Video 3.0' },
+            { value: 'jimeng-video-3.0-fast', label: 'Video 3.0 Fast' },
+            { value: 'jimeng-video-2.0', label: 'Video 2.0' },
+            { value: 'jimeng-video-2.0-pro', label: 'Video 2.0 Pro' }
+        ],
+        'US': [
+            { value: 'jimeng-video-3.5-pro', label: 'Video 3.5 Pro' },
+            { value: 'jimeng-video-3.0', label: 'Video 3.0' }
+        ],
+        'ASIA': [
+            { value: 'jimeng-video-veo3', label: 'Video Veo 3' },
+            { value: 'jimeng-video-veo3.1', label: 'Video Veo 3.1' },
+            { value: 'jimeng-video-sora2', label: 'Video Sora 2' },
+            { value: 'jimeng-video-3.5-pro', label: 'Video 3.5 Pro' },
+            { value: 'jimeng-video-3.0-pro', label: 'Video 3.0 Pro' },
+            { value: 'jimeng-video-3.0', label: 'Video 3.0' },
+            { value: 'jimeng-video-3.0-fast', label: 'Video 3.0 Fast' },
+            { value: 'jimeng-video-2.0', label: 'Video 2.0' },
+            { value: 'jimeng-video-2.0-pro', label: 'Video 2.0 Pro' }
+        ]
+    };
+    
+    const models = videoModels[region] || videoModels['CN'];
+    
+    models.forEach(model => {
+        const option = document.createElement('option');
+        option.value = model.value;
+        option.textContent = model.label;
+        videoModelSelect.appendChild(option);
+    });
 }
 
 // Helper to send message with auto-retry (handles SW wake-up issues)
@@ -171,10 +297,9 @@ async function checkStatus() {
                 userIdEl.textContent = "Not Logged In";
                 badge.style.color = "#f44336"; // Red
             }
-            // Auto-set UI if not set
-            if (!currentRegion && res.code) {
-                if (res.code === "CN") currentRegion = "CN";
-                if (res.code === "US") currentRegion = "US";
+            // Auto-set UI if not set (only on first load)
+            if (!currentRegion && res.regionType) {
+                currentRegion = res.regionType;
                 updateToggleUI();
             }
         } else {
@@ -232,8 +357,7 @@ async function loadPromptsFromJson(json, sourceName) {
     window.batchCurrentIndex = 0;
     
     // Update button text
-    const btn = document.getElementById('generateBtn');
-    btn.textContent = `Start Batch (${prompts.length})`;
+    updateGenerateButtonText();
     
     statusEl.textContent = `Ready to process ${prompts.length} prompts from "${sourceName}"`;
     statusEl.className = 'success';
@@ -289,8 +413,9 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Track already displayed images to prevent duplicates
+// Track already displayed images/videos to prevent duplicates
 const displayedImages = new Set();
+const displayedVideos = new Set();
 
 const BATCH_QUEUE_KEY = 'jimeng_batch_queue';
 
@@ -338,8 +463,7 @@ async function resumeBatchIfNeeded() {
     window.isResuming = true;
     
     // Update button
-    const btn = document.getElementById('generateBtn');
-    btn.textContent = `Continue Batch (${remaining})`;
+    updateGenerateButtonText();
     
     return true;
 }
@@ -378,6 +502,30 @@ function handleBatchResult(payload) {
     });
 }
 
+// Handle batch video result from background
+function handleBatchVideoResult(payload) {
+    const progressContainer = document.getElementById('batchProgress');
+    
+    // Find the progress item for this prompt
+    const items = progressContainer?.querySelectorAll('.progress-item') || [];
+    items.forEach(item => {
+        const nameSpan = item.querySelector('span:first-child');
+        if (nameSpan && nameSpan.textContent.includes(payload.promptName)) {
+            const statusSpan = item.querySelector('span:last-child');
+            if (payload.success && payload.videoUrl) {
+                statusSpan.textContent = '✓ Video';
+                statusSpan.className = 'progress-success';
+                
+                // Store video URL
+                displayedVideos.add(payload.videoUrl);
+            } else {
+                statusSpan.textContent = '✗ Failed';
+                statusSpan.className = 'progress-error';
+            }
+        }
+    });
+}
+
 // Generate single image - ASYNC mode (submit and return immediately)
 async function generateSingleImage(promptData, model, ratio, preferredRegion) {
     const response = await sendMessageWithRetry({
@@ -389,6 +537,24 @@ async function generateSingleImage(promptData, model, ratio, preferredRegion) {
             ratio,
             resolution: "2k",
             preferredRegion
+        }
+    });
+    return response;
+}
+
+// Generate video
+async function generateVideo(prompt, model, ratio, duration, resolution, preferredRegion, firstFrame, endFrame) {
+    const response = await sendMessageWithRetry({
+        action: "GENERATE_VIDEO",
+        payload: {
+            prompt,
+            model,
+            ratio,
+            duration: parseInt(duration),
+            resolution,
+            preferredRegion,
+            firstFrameImage: firstFrame,
+            endFrameImage: endFrame
         }
     });
     return response;
@@ -475,7 +641,7 @@ async function processBatch(prompts, model, ratio, preferredRegion, startIndex =
     window.isBatchMode = false;
     window.isResuming = false;
     window.batchPrompts = [];
-    btn.textContent = 'Generate Image';
+    btn.textContent = currentMode === 'image' ? 'Generate Image' : 'Generate Video';
     
     statusEl.textContent = `All ${submitted.length + startIndex}/${total} submitted! Results will appear as they complete.`;
     statusEl.className = 'success';
@@ -483,10 +649,55 @@ async function processBatch(prompts, model, ratio, preferredRegion, startIndex =
     return submitted;
 }
 
+// Handle frame image uploads
+async function handleFirstFrameUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    const preview = document.getElementById('first-frame-preview');
+    const status = document.getElementById('frame-status');
+    
+    try {
+        firstFrameData = await readFileAsBase64(file);
+        preview.src = firstFrameData;
+        preview.style.display = 'inline-block';
+        status.textContent = `First frame: ${file.name}`;
+    } catch (err) {
+        status.textContent = 'Error loading first frame';
+        status.style.color = '#d32f2f';
+    }
+}
+
+async function handleEndFrameUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    const preview = document.getElementById('end-frame-preview');
+    const status = document.getElementById('frame-status');
+    
+    try {
+        endFrameData = await readFileAsBase64(file);
+        preview.src = endFrameData;
+        preview.style.display = 'inline-block';
+        status.textContent = (status.textContent ? status.textContent + ' | ' : '') + `End frame: ${file.name}`;
+    } catch (err) {
+        status.textContent = 'Error loading end frame';
+        status.style.color = '#d32f2f';
+    }
+}
+
+function readFileAsBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+}
+
+// Main generate button handler
 document.getElementById('generateBtn').addEventListener('click', async () => {
     const prompt = document.getElementById('prompt').value;
-    const model = document.getElementById('model').value;
-    const ratio = document.getElementById('ratio').value;
     const statusEl = document.getElementById('status');
     const btn = document.getElementById('generateBtn');
     const gallery = document.getElementById('gallery');
@@ -499,10 +710,12 @@ document.getElementById('generateBtn').addEventListener('click', async () => {
         return;
     }
 
-    // Handle batch mode (new or resume)
-    if (window.isBatchMode && window.batchPrompts && window.batchPrompts.length > 0) {
+    // Handle batch mode (new or resume) - image mode only
+    if (currentMode === 'image' && window.isBatchMode && window.batchPrompts && window.batchPrompts.length > 0) {
+        const model = document.getElementById('image-model').value;
+        const ratio = document.getElementById('image-ratio').value;
+        
         if (window.isResuming) {
-            // Resume from where we left off
             await processBatch(
                 window.batchPrompts, 
                 window.batchModel || model, 
@@ -511,7 +724,6 @@ document.getElementById('generateBtn').addEventListener('click', async () => {
                 window.batchCurrentIndex || 0
             );
         } else {
-            // Fresh start
             gallery.innerHTML = '';
             displayedImages.clear();
             await processBatch(window.batchPrompts, model, ratio, preferredRegion);
@@ -527,36 +739,85 @@ document.getElementById('generateBtn').addEventListener('click', async () => {
     }
 
     btn.disabled = true;
-    btn.textContent = "Generating...";
-    statusEl.textContent = "Sending request to Jimeng/Dreamina...";
+    statusEl.textContent = currentMode === 'image' ? "Generating image..." : "Generating video (this may take a few minutes)...";
     statusEl.className = "";
     gallery.innerHTML = "";
+    document.getElementById('video-result').style.display = 'none';
 
     try {
-        const response = await sendMessageWithRetry({
-            action: "GENERATE_IMAGE",
-            payload: {
-                prompt,
-                model,
-                ratio,
-                resolution: "2k",
-                preferredRegion
-            }
-        });
-
-        if (response && response.success) {
-            statusEl.textContent = "Generation complete!";
-            statusEl.className = "success";
-
-            response.images.forEach(url => {
-                const img = document.createElement('img');
-                img.src = url;
-                img.onclick = () => window.open(url, '_blank');
-                gallery.appendChild(img);
+        if (currentMode === 'image') {
+            // Image generation
+            const model = document.getElementById('image-model').value;
+            const ratio = document.getElementById('image-ratio').value;
+            const resolution = document.getElementById('image-resolution').value;
+            
+            const response = await sendMessageWithRetry({
+                action: "GENERATE_IMAGE",
+                payload: {
+                    prompt,
+                    model,
+                    ratio,
+                    resolution,
+                    preferredRegion
+                }
             });
+
+            if (response && response.success) {
+                statusEl.textContent = "Generation complete!";
+                statusEl.className = "success";
+
+                response.images.forEach(url => {
+                    const img = document.createElement('img');
+                    img.src = url;
+                    img.onclick = () => window.open(url, '_blank');
+                    gallery.appendChild(img);
+                });
+            } else {
+                statusEl.textContent = `Error: ${response?.error || 'Unknown error'}`;
+                statusEl.className = "error";
+            }
         } else {
-            statusEl.textContent = `Error: ${response?.error || 'Unknown error'}`;
-            statusEl.className = "error";
+            // Video generation
+            const model = document.getElementById('video-model').value;
+            const ratio = document.getElementById('video-ratio').value;
+            const duration = document.getElementById('video-duration').value;
+            const resolution = document.getElementById('video-quality').value;
+            
+            const response = await generateVideo(
+                prompt, 
+                model, 
+                ratio, 
+                duration, 
+                resolution, 
+                preferredRegion,
+                firstFrameData,
+                endFrameData
+            );
+
+            if (response && response.success) {
+                statusEl.textContent = "Video generation complete!";
+                statusEl.className = "success";
+
+                // Display video
+                const videoResult = document.getElementById('video-result');
+                const videoPlayer = document.getElementById('video-player');
+                const videoDownload = document.getElementById('video-download');
+                
+                videoPlayer.src = response.videoUrl;
+                videoDownload.href = response.videoUrl;
+                videoDownload.textContent = 'Download Video';
+                videoResult.style.display = 'block';
+                
+                // Also add to gallery for consistency
+                const videoThumb = document.createElement('video');
+                videoThumb.src = response.videoUrl;
+                videoThumb.style.cursor = 'pointer';
+                videoThumb.onclick = () => window.open(response.videoUrl, '_blank');
+                gallery.appendChild(videoThumb);
+            } else {
+                statusEl.textContent = `Error: ${response?.error || 'Unknown error'}`;
+                statusEl.className = "error";
+            }
         }
 
     } catch (err) {
@@ -564,7 +825,7 @@ document.getElementById('generateBtn').addEventListener('click', async () => {
         statusEl.className = "error";
     } finally {
         btn.disabled = false;
-        btn.textContent = "Generate Image";
+        updateGenerateButtonText();
     }
 });
 
